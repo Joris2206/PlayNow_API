@@ -6,7 +6,6 @@ from rest_framework.permissions import AllowAny
 import logging
 
 class LoginView(TokenObtainPairView):
-    # Aplica scope 'login'
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'login'
     permission_classes = [AllowAny]

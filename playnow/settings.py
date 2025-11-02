@@ -169,8 +169,10 @@ REST_FRAMEWORK = {
         "user": "20000/day",
         "login": "10/min",
         "password_reset": "5/min",
-        "public_read": "100/min",
+        "public_read": "60/min",
         "admin_write": "120/min",
+        "auth_reset_request": "5/min",
+        "auth_reset_confirm": "10/min",
     },
 
     "DEFAULT_FILTER_BACKENDS": [
@@ -236,6 +238,17 @@ SECURE_SSL_REDIRECT = os.getenv("DJANGO_SECURE_SSL_REDIRECT", "true").lower() ==
 SECURE_HSTS_SECONDS = 31536000 if not DEBUG else 0
 SECURE_HSTS_INCLUDE_SUBDOMAINS = not DEBUG
 SECURE_HSTS_PRELOAD = not DEBUG
+
+FRONTEND_RESET_URL = os.getenv("FRONTEND_RESET_URL", "https://localhost:4200/reset-password")
+PASSWORD_RESET_TIMEOUT = 60 * 60 * 24
+
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.gmail.com")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True").lower() == "true"
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER or "webmaster@localhost")
 
 # Dominios/orígenes de confianza para CSRF
 CSRF_TRUSTED_ORIGINS = list_from_env(

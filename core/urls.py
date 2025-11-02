@@ -8,7 +8,7 @@ from .views import (
     TransactionViewSet, DebtViewSet, DebtPaymentViewSet,
     NotificationViewSet, ReminderViewSet,
     BudgetViewSet, GoalViewSet, GoalProgressViewSet,
-    StockMovementViewSet
+    StockMovementViewSet, UserViewSet, PasswordResetRequestView, PasswordResetConfirmView,
 )
 
 router = DefaultRouter()
@@ -50,7 +50,12 @@ router.register(r'goal-progress', GoalProgressViewSet, basename='goalprogress')
 # inventario
 router.register(r'stock-movements', StockMovementViewSet, basename='stockmovement')
 
+# User
+router.register(r'users', UserViewSet, basename='user')
+
 urlpatterns = [
+    path("auth/password/reset/", PasswordResetRequestView.as_view(), name="password-reset-request"),
+    path("auth/password/reset/confirm/", PasswordResetConfirmView.as_view(), name="password-reset-confirm"),
     path('health/', healthcheck, name='healthcheck'),
     path('', include(router.urls)),
 ]

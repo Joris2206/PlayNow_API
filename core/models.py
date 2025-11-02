@@ -47,7 +47,7 @@ class Business(models.Model):
     business_name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     currency = models.CharField(max_length=10)
-    status = models.ForeignKey('EntityStatus', on_delete=models.PROTECT)  # <- manejo de estado
+    status = models.ForeignKey('EntityStatus', on_delete=models.PROTECT)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

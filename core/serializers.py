@@ -51,13 +51,28 @@ class PaymentMethodSerializer(serializers.ModelSerializer):
 
 # ---------- Business ----------
 class BusinessSerializer(serializers.ModelSerializer):
+    status = serializers.PrimaryKeyRelatedField(
+        queryset=EntityStatus.objects.all(),
+        required=False,
+        allow_null=True
+    )
     class Meta:
         model = Business
         fields = ("public_id", "business_name", "description", "currency", "status", "created_at", "updated_at")
         read_only_fields = ("public_id", "created_at", "updated_at")
+        extra_kwargs = {
+            "status": {"required": False}
+        }
+
     def create(self, validated_data):
-        # amarra el negocio al usuario autenticado
-        validated_data["user"] = self.context["request"].user
+        validated_data.setdefault("user", self.context["request"].user)
+
+        if not validated_data.get("status"):
+            active = EntityStatus.objects.filter(name__iexact="Activo").first()
+            if not active:
+                raise serializers.ValidationError({"status": 'No existe el estado "Activo".'})
+            validated_data["status"] = active
+
         return super().create(validated_data)
 
 # ---------- Productos ----------
@@ -67,6 +82,11 @@ class ProductCategorySerializer(serializers.ModelSerializer):
         fields = ("public_id", "name", "created_at", "updated_at")
 
 class ProductSerializer(serializers.ModelSerializer):
+    status = serializers.PrimaryKeyRelatedField(
+        queryset=EntityStatus.objects.all(),
+        required=False,
+        allow_null=True
+    )
     class Meta:
         model = Product
         fields = (
@@ -76,31 +96,91 @@ class ProductSerializer(serializers.ModelSerializer):
         )
         read_only_fields = ("public_id", "created_at", "updated_at")
 
+    def create(self, validated_data):
+        if not validated_data.get("status"):
+            active = EntityStatus.objects.filter(name__iexact="Activo").first()
+            if not active:
+                raise serializers.ValidationError({"status": 'No existe el estado "Activo".'})
+            validated_data["status"] = active
+        return super().create(validated_data)
+
 class ProductVariantTypeSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductVariantType
         fields = ("public_id", "product", "name")
 
 class ProductVariantSerializer(serializers.ModelSerializer):
+    status = serializers.PrimaryKeyRelatedField(
+        queryset=EntityStatus.objects.all(),
+        required=False,
+        allow_null=True
+    )
     class Meta:
         model = ProductVariant
         fields = ("public_id", "variant_type", "label", "additional_price", "stock", "status")
 
+    def create(self, validated_data):
+        if not validated_data.get("status"):
+            active = EntityStatus.objects.filter(name__iexact="Activo").first()
+            if not active:
+                raise serializers.ValidationError({"status": 'No existe el estado "Activo".'})
+            validated_data["status"] = active
+        return super().create(validated_data)
+
 # ---------- Personas/Entidades ----------
 class EmployeeSerializer(serializers.ModelSerializer):
+    status = serializers.PrimaryKeyRelatedField(
+        queryset=EntityStatus.objects.all(),
+        required=False,
+        allow_null=True
+    )
     class Meta:
         model = Employee
         fields = ("public_id", "business", "full_name", "phone", "role", "status", "created_at", "updated_at")
 
+    def create(self, validated_data):
+        if not validated_data.get("status"):
+            active = EntityStatus.objects.filter(name__iexact="Activo").first()
+            if not active:
+                raise serializers.ValidationError({"status": 'No existe el estado "Activo".'})
+            validated_data["status"] = active
+        return super().create(validated_data)
+
 class CustomerSerializer(serializers.ModelSerializer):
+    status = serializers.PrimaryKeyRelatedField(
+        queryset=EntityStatus.objects.all(),
+        required=False,
+        allow_null=True
+    )
     class Meta:
         model = Customer
         fields = ("public_id", "business", "full_name", "phone", "email", "status", "created_at", "updated_at")
 
+    def create(self, validated_data):
+        if not validated_data.get("status"):
+            active = EntityStatus.objects.filter(name__iexact="Activo").first()
+            if not active:
+                raise serializers.ValidationError({"status": 'No existe el estado "Activo".'})
+            validated_data["status"] = active
+        return super().create(validated_data)
+
 class SupplierSerializer(serializers.ModelSerializer):
+    status = serializers.PrimaryKeyRelatedField(
+        queryset=EntityStatus.objects.all(),
+        required=False,
+        allow_null=True
+    )
     class Meta:
         model = Supplier
         fields = ("public_id", "business", "name", "phone", "email", "status", "created_at", "updated_at")
+    
+    def create(self, validated_data):
+        if not validated_data.get("status"):
+            active = EntityStatus.objects.filter(name__iexact="Activo").first()
+            if not active:
+                raise serializers.ValidationError({"status": 'No existe el estado "Activo".'})
+            validated_data["status"] = active
+        return super().create(validated_data)
 
 # ---------- Transacciones ----------
 class TransactionDetailSerializer(serializers.ModelSerializer):
@@ -114,6 +194,12 @@ class TransactionDetailSerializer(serializers.ModelSerializer):
         read_only_fields = ("public_id", "total_price")
 
 class TransactionSerializer(serializers.ModelSerializer):
+    status = serializers.PrimaryKeyRelatedField(
+        queryset=EntityStatus.objects.all(),
+        required=False,
+        allow_null=True
+    )
+
     details = TransactionDetailSerializer(many=True)
     business_currency = serializers.CharField(source="business.currency", read_only=True)
 
@@ -126,18 +212,55 @@ class TransactionSerializer(serializers.ModelSerializer):
             "details", "business_currency", "created_at", "updated_at"
         )
         read_only_fields = ("public_id", "total_value", "created_at", "updated_at")
+        extra_kwargs = {"details": {"write_only": True}}
 
     def validate(self, attrs):
         ttype = attrs.get("type")
         if ttype not in dict(Transaction.TRANSACTION_TYPES):
             raise serializers.ValidationError({"type": "Invalid transaction type."})
+
+        biz = attrs.get("business")
+        if not biz:
+            raise serializers.ValidationError({"business": "Este campo es requerido."})
+
+        for field in ("customer", "supplier", "employee", "payment_method"):
+            obj = attrs.get(field)
+            if obj and getattr(obj, "business_id", biz.id) != biz.id:
+                raise serializers.ValidationError({
+                    field: f"El {field} no pertenece al mismo negocio seleccionado."
+                })
         return attrs
 
+    def validate_details(self, value):
+        if not value:
+            raise serializers.ValidationError("Debe incluir al menos un detalle.")
+        for i, d in enumerate(value, start=1):
+            product = d.get("product")
+            qty = d.get("quantity") or 0
+            up = d.get("unit_price") or 0
+            variant = d.get("variant")
+
+            if qty <= 0:
+                raise serializers.ValidationError(f"Detalle #{i}: quantity debe ser > 0.")
+            if up < 0:
+                raise serializers.ValidationError(f"Detalle #{i}: unit_price no puede ser negativo.")
+            if not product:
+                raise serializers.ValidationError(f"Detalle #{i}: debe incluir producto.")
+            if variant and getattr(variant, "variant_type", None) and variant.variant_type.product_id != product.id:
+                raise serializers.ValidationError(f"Detalle #{i}: la variante no pertenece al producto.")
+        return value
+    
     @db_tx.atomic
     def create(self, validated_data):
         details_data = validated_data.pop("details", [])
-        # crear transacción base con total 0 y luego acumular
-        tx_obj = Transaction.objects.create(**validated_data, total_value=0)
+
+        if not validated_data.get("status"):
+            active = EntityStatus.objects.filter(name__iexact="Activo").first()
+            if not active:
+                raise serializers.ValidationError({"status": 'No existe el estado "Activo".'})
+            validated_data["status"] = active
+
+        tx = Transaction.objects.create(**validated_data, total_value=0)
 
         total = 0
         for d in details_data:
@@ -145,62 +268,14 @@ class TransactionSerializer(serializers.ModelSerializer):
             variant = d.get("variant")
             qty = d["quantity"]
 
-            # calcular unit_price si no viene
             unit_price = d.get("unit_price")
             if unit_price is None:
-                base = product.base_price
-                if variant:
-                    base = base + variant.additional_price
+                base = product.base_price + (variant.additional_price if variant else 0)
                 unit_price = base
 
             line_total = unit_price * qty
-
-            # validar stock (en sales/purchases/adjust)
-            if tx_obj.type == "sale":
-                # baja stock de variant si existe, si no, del producto
-                if variant:
-                    if variant.stock < qty:
-                        raise serializers.ValidationError({"details": f"Stock insuficiente en variante {variant.label}"})
-                    variant.stock -= qty
-                    variant.save(update_fields=["stock"])
-                else:
-                    if product.stock < qty:
-                        raise serializers.ValidationError({"details": f"Stock insuficiente en producto {product.title}"})
-                    product.stock -= qty
-                    product.save(update_fields=["stock"])
-
-                StockMovement.objects.create(
-                    product=product,
-                    variant=variant,
-                    transaction=tx_obj,
-                    note="Venta",
-                    type="sale",
-                    quantity=qty
-                )
-
-            elif tx_obj.type == "purchase":
-                # compra -> entra stock
-                if variant:
-                    variant.stock += qty
-                    variant.save(update_fields=["stock"])
-                else:
-                    product.stock += qty
-                    product.save(update_fields=["stock"])
-
-                StockMovement.objects.create(
-                    product=product,
-                    variant=variant,
-                    transaction=tx_obj,
-                    note="Compra",
-                    type="entry",
-                    quantity=qty
-                )
-            else:  # expense
-                # gasto: no toca inventario por defecto; ajusta si quieres
-                pass
-
             TransactionDetail.objects.create(
-                transaction=tx_obj,
+                transaction=tx,
                 product=product,
                 variant=variant,
                 quantity=qty,
@@ -209,27 +284,25 @@ class TransactionSerializer(serializers.ModelSerializer):
             )
             total += line_total
 
-        # aplicar descuento si hay
         discount = validated_data.get("discount_percent") or 0
         if discount:
             total = total * (1 - (discount / 100))
 
-        tx_obj.total_value = total
-        tx_obj.save(update_fields=["total_value"])
+        tx.total_value = total
+        tx.save(update_fields=["total_value"])
 
-        # si es deuda, crear registro Debt
-        if tx_obj.is_debt or (tx_obj.payment_status and tx_obj.payment_status.lower() in {"partial", "pending"}):
+        # deuda (si corresponde)
+        if tx.is_debt or (tx.payment_status and tx.payment_status.lower() in {"partial", "pending"}):
             Debt.objects.create(
-                transaction=tx_obj,
-                total_amount=tx_obj.total_value,
+                transaction=tx,
+                total_amount=tx.total_value,
                 paid_amount=0,
                 interest_rate=0,
                 term_months=0,
                 due_date=timezone.now().date(),
                 is_settled=False
             )
-
-        return tx_obj
+        return tx
 
 # ---------- Pagos de Deuda ----------
 class DebtSerializer(serializers.ModelSerializer):
