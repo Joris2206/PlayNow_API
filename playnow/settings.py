@@ -1,5 +1,5 @@
 """
-Django settings for playnow project (Django 4.2.x).
+Django settings for playnow project (Django 5.2.5).
 
 Modo dev/prod controlado por variables de entorno.
 """

@@ -1,9 +1,10 @@
+from django.core.exceptions import FieldDoesNotExist
 from rest_framework import viewsets, mixins, status
 from rest_framework.views import APIView
 from rest_framework.decorators import action, api_view, permission_classes, throttle_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError, PermissionDenied
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiExample, OpenApiResponse
 from .filters import StockMovementFilter
 from .pagination import StandardResultsSetPagination
@@ -18,6 +19,7 @@ from .serializers import HealthSerializer
 from .services.serializer import ChangePasswordSerializer, PasswordResetRequestSerializer, PasswordResetConfirmSerializer
 from django.conf import settings
 from rest_framework import serializers
+
 FRONTEND_RESET_URL = settings.FRONTEND_RESET_URL
 
 from .models import (
@@ -64,61 +66,204 @@ class RegisterViewSet(mixins.CreateModelMixin, viewsets.GenericViewSet):
 
 class BusinessScopedViewSet(viewsets.ModelViewSet):
     """
-    Filtra por negocio/usuario y excluye inactivos por defecto.
-    Admin ve todo.
+    ViewSet base para recursos pertenecientes a un usuario o negocio.
+
+    Reglas:
+    - Un superusuario de Django puede consultar todos los registros.
+    - Un usuario normal solo puede consultar registros de sus negocios.
+    - No se permite crear ni mover registros hacia negocios ajenos.
+    - Los registros inactivos se excluyen por defecto.
     """
+
     permission_classes = [IsAuthenticated, IsOwnerOrBusinessOwner]
     throttle_classes = [ScopedRateThrottle]
-    
-    """ EXCLUDED_STATUS_NAMES = ["Eliminado", "Anulado", "Inactivo", "Cancelado"] """
-    EXCLUDED_STATUS_NAMES = []
 
+    EXCLUDED_STATUS_NAMES = [
+        "Eliminado",
+        "Anulado",
+        "Inactivo",
+        "Cancelado",
+    ]
+    owner_lookup = None
+    
     def get_throttles(self):
-        self.throttle_scope = "public_read" if self.action in ("list", "retrieve") else "admin_write"
+        self.throttle_scope = (
+            "public_read"
+            if self.action in ("list", "retrieve")
+            else "admin_write"
+        )
         return super().get_throttles()
 
-    def _model_has_field(self, model_cls, field_name: str) -> bool:
-        return any(f.name == field_name for f in model_cls._meta.get_fields())
+    @staticmethod
+    def _is_platform_admin(user) -> bool:
+        """
+        Solo un superusuario de Django tiene acceso global.
+
+        No se utiliza user.role == "admin", porque ese rol puede representar
+        al administrador de un negocio, no al administrador de la plataforma.
+        """
+        return bool(
+            user
+            and user.is_authenticated
+            and user.is_superuser
+        )
+
+    @staticmethod
+    def _model_has_field(model_cls, field_name: str) -> bool:
+        try:
+            model_cls._meta.get_field(field_name)
+            return True
+        except FieldDoesNotExist:
+            return False
+
+    def _user_can_access_business(self, user, business) -> bool:
+        if self._is_platform_admin(user):
+            return True
+
+        return business.user_id == user.id
+
+    def _validate_business_access(self, business) -> None:
+        if business is None:
+            return
+
+        if not self._user_can_access_business(self.request.user, business):
+            raise PermissionDenied(
+                "No tienes permiso para utilizar este negocio."
+            )
 
     def get_queryset(self):
         qs = super().get_queryset()
         user = self.request.user
-        model_cls = self.queryset.model
+        model_cls = qs.model
 
-        if getattr(user, "role", "") != "admin":
-            if self._model_has_field(model_cls, "business"):
+        if not self._is_platform_admin(user):
+            owner_lookup = getattr(self, "owner_lookup", None)
+
+            if owner_lookup:
+                qs = qs.filter(**{owner_lookup: user})
+
+            elif self._model_has_field(model_cls, "business"):
                 qs = qs.filter(business__user=user)
+
             elif self._model_has_field(model_cls, "user"):
                 qs = qs.filter(user=user)
 
-        include_inactive = self.request.query_params.get("include_inactive")
-        want_inactive = str(include_inactive).lower() in ("1", "true", "yes", "y")
-        if self._model_has_field(model_cls, "status") and not want_inactive:
-            qs = qs.exclude(status__name__in=self.EXCLUDED_STATUS_NAMES)
+            else:
+                # Un modelo sin una ruta de propietario definida no debe
+                # mostrar accidentalmente todos sus registros.
+                qs = qs.none()
 
-        return qs
+        include_inactive = self.request.query_params.get(
+            "include_inactive"
+        )
+
+        want_inactive = str(include_inactive).lower() in (
+            "1",
+            "true",
+            "yes",
+            "y",
+        )
+
+        if (
+            self._model_has_field(model_cls, "status")
+            and not want_inactive
+        ):
+            qs = qs.exclude(
+                status__name__in=self.EXCLUDED_STATUS_NAMES
+            )
+
+        return qs.distinct()
 
     def perform_create(self, serializer):
         model_cls = serializer.Meta.model
+        user = self.request.user
         extra = {}
 
-        if self._model_has_field(model_cls, "status") and "status" not in serializer.validated_data:
-            active = EntityStatus.objects.filter(name__iexact="Activo").first()
-            extra["status"] = active
+        # Para modelos como Business, el propietario siempre será
+        # el usuario autenticado, excepto para un superusuario.
+        if self._model_has_field(model_cls, "user"):
+            submitted_user = serializer.validated_data.get("user")
+
+            if self._is_platform_admin(user) and submitted_user is not None:
+                extra["user"] = submitted_user
+            else:
+                extra["user"] = user
+
+        # Evita crear productos, clientes, deudas, etc. dentro
+        # de un negocio perteneciente a otro usuario.
+        if self._model_has_field(model_cls, "business"):
+            business = serializer.validated_data.get("business")
+
+            if business is None:
+                raise PermissionDenied(
+                    "Debes indicar un negocio válido."
+                )
+
+            self._validate_business_access(business)
+
+        if (
+            self._model_has_field(model_cls, "status")
+            and "status" not in serializer.validated_data
+        ):
+            active_status = EntityStatus.objects.filter(
+                name__iexact="Activo"
+            ).first()
+
+            if active_status is None:
+                raise PermissionDenied(
+                    "No existe el estado inicial 'Activo'. "
+                    "Ejecuta el comando seed_statuses."
+                )
+
+            extra["status"] = active_status
 
         obj = serializer.save(**extra)
-        log_action(self.request.user, "CREATE", model_cls.__name__, obj.pk)
+
+        log_action(
+            user,
+            "CREATE",
+            model_cls.__name__,
+            obj.pk,
+        )
 
     def perform_update(self, serializer):
+        model_cls = serializer.Meta.model
+
+        # Evita cambiar el propietario directo de un registro.
+        if (
+            self._model_has_field(model_cls, "user")
+            and not self._is_platform_admin(self.request.user)
+        ):
+            serializer.validated_data.pop("user", None)
+
+        # Evita mover un producto, deuda, cliente, etc.
+        # hacia un negocio ajeno.
+        if self._model_has_field(model_cls, "business"):
+            new_business = serializer.validated_data.get("business")
+
+            if new_business is not None:
+                self._validate_business_access(new_business)
+
         obj = serializer.save()
-        # Audit
-        log_action(self.request.user, "UPDATE", obj.__class__.__name__, obj.pk)
+
+        log_action(
+            self.request.user,
+            "UPDATE",
+            obj.__class__.__name__,
+            obj.pk,
+        )
 
     def perform_destroy(self, instance):
+        # Más adelante cambiaremos esto por baja lógica.
+        # Por ahora se mantiene el comportamiento existente.
         super().perform_destroy(instance)
-        # Audit
-        log_action(self.request.user, "DELETE", instance.__class__.__name__, instance.pk)
 
+        log_action(
+            self.request.user,
+            "DELETE",
+            instance.__class__.__name__,
+            instance.pk,
+        )
 # -------- ViewSets --------
 
 @extend_schema_view(
@@ -132,6 +277,9 @@ class BusinessScopedViewSet(viewsets.ModelViewSet):
 class BusinessViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = Business.objects.select_related("status", "user").all()
     serializer_class = BusinessSerializer
+
+    owner_lookup = "user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
@@ -160,6 +308,9 @@ class EntityStatusViewSet(viewsets.ReadOnlyModelViewSet):
 class ProductCategoryViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = ProductCategory.objects.all()
     serializer_class = ProductCategorySerializer
+
+    owner_lookup = "business__user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
@@ -176,6 +327,9 @@ class ProductCategoryViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 class ProductViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = Product.objects.select_related("business", "category", "status").all()
     serializer_class = ProductSerializer
+
+    owner_lookup = "business__user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
 
@@ -198,6 +352,9 @@ class ProductViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 class ProductVariantTypeViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = ProductVariantType.objects.select_related("product").all()
     serializer_class = ProductVariantTypeSerializer
+
+    owner_lookup = "product__business__user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
@@ -214,6 +371,9 @@ class ProductVariantTypeViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 class ProductVariantViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = ProductVariant.objects.select_related("variant_type", "variant_type__product").all()
     serializer_class = ProductVariantSerializer
+
+    owner_lookup = "variant_type__product__business__user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
@@ -232,6 +392,8 @@ class EmployeeViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     serializer_class = EmployeeSerializer
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
+
+    owner_lookup = "business__user"
 
     filterset_fields = ["status", "business", "business__public_id"]
     search_fields = ["full_name", "phone"]
@@ -255,6 +417,8 @@ class CustomerViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
 
+    owner_lookup = "business__user"
+    
     filterset_fields = ["status", "business", "business__public_id"]
     search_fields = ["full_name", "email", "phone"]
     ordering_fields = ["full_name", "created_at", "updated_at"]
@@ -276,6 +440,8 @@ class SupplierViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     serializer_class = SupplierSerializer
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
+
+    owner_lookup = "business__user"
 
     filterset_fields = ["status", "business", "business__public_id"]
     search_fields = ["name", "email", "phone"]
@@ -305,10 +471,6 @@ class PaymentMethodViewSet(SoftDeleteByStatusMixin, viewsets.ModelViewSet):
 @extend_schema_view(
     list=extend_schema(tags=["Stock Movements"]),
     retrieve=extend_schema(tags=["Stock Movements"]),
-    create=extend_schema(tags=["Stock Movements"]),
-    update=extend_schema(tags=["Stock Movements"]),
-    partial_update=extend_schema(tags=["Stock Movements"]),
-    destroy=extend_schema(tags=["Stock Movements"]),
 )
 class StockMovementViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = (
@@ -317,15 +479,17 @@ class StockMovementViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         .all()
     )
     serializer_class = StockMovementSerializer
+
+    owner_lookup = "product__business__user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
 
-    def get_queryset(self):
-        qs = super().get_queryset()
-        user = self.request.user
-        if getattr(user, "role", "") == "admin":
-            return qs
-        return qs.filter(product__business__user=user)
+    http_method_names = [
+        "get",
+        "head",
+        "options",
+    ]
 
     filterset_class = StockMovementFilter
     search_fields = ["product__title", "variant__label", "variant__variant_type__name", "transaction__public_id"]
@@ -350,6 +514,9 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         .all()
     )
     serializer_class = TransactionSerializer
+    
+    owner_lookup = "business__user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
@@ -578,6 +745,9 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 class DebtViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = Debt.objects.select_related("transaction", "transaction__business").all()
     serializer_class = DebtSerializer
+
+    owner_lookup = "transaction__business__user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
@@ -594,6 +764,9 @@ class DebtViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 class DebtPaymentViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = DebtPayment.objects.select_related("debt", "debt__transaction").all()
     serializer_class = DebtPaymentSerializer
+
+    owner_lookup = "debt__transaction__business__user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
@@ -610,6 +783,9 @@ class DebtPaymentViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 class NotificationViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = Notification.objects.select_related("user", "business", "transaction").all()
     serializer_class = NotificationSerializer
+
+    owner_lookup = "user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
@@ -626,6 +802,9 @@ class NotificationViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 class ReminderViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = Reminder.objects.select_related("user", "business", "transaction").all()
     serializer_class = ReminderSerializer
+
+    owner_lookup = "user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
@@ -642,6 +821,9 @@ class ReminderViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 class BudgetViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = Budget.objects.select_related("user", "business").all()
     serializer_class = BudgetSerializer
+
+    owner_lookup = "user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
@@ -658,10 +840,12 @@ class BudgetViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 class GoalViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = Goal.objects.select_related("user", "business").all()
     serializer_class = GoalSerializer
+
+    owner_lookup = "user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
-
 
 @extend_schema_view(
     list=extend_schema(tags=["Goal Progress"]),
@@ -674,6 +858,9 @@ class GoalViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 class GoalProgressViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = GoalProgress.objects.select_related("goal", "goal__business").all()
     serializer_class = GoalProgressSerializer
+
+    owner_lookup = "goal__user"
+
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination

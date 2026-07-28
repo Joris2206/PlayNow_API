@@ -5,27 +5,70 @@ from django.db.models import Q
 
 # Opcional: Custom user manager
 class UserManager(BaseUserManager):
-    def create_user(self, email, full_name, password=None, **extra_fields):
+    def create_user(
+        self,
+        email,
+        full_name,
+        password=None,
+        **extra_fields,
+    ):
         if not email:
-            raise ValueError("Email is required")
+            raise ValueError("El correo electrónico es obligatorio.")
+
+        if not full_name:
+            raise ValueError("El nombre completo es obligatorio.")
+
         email = self.normalize_email(email)
-        user = self.model(email=email, full_name=full_name, **extra_fields)
+
+        user = self.model(
+            email=email,
+            full_name=full_name,
+            **extra_fields,
+        )
+
         user.set_password(password)
         user.save(using=self._db)
+
         return user
 
-    def create_superuser(self, email, full_name, password=None, **extra_fields):
-        extra_fields.setdefault('is_staff', True)
-        extra_fields.setdefault('is_superuser', True)
-        return self.create_user(email, full_name, password, **extra_fields)
+    def create_superuser(
+        self,
+        email,
+        full_name,
+        password=None,
+        **extra_fields,
+    ):
+        extra_fields.setdefault("role", User.Roles.BUSINESS_ADMIN)
+        extra_fields.setdefault("is_active", True)
+        extra_fields.setdefault("is_staff", True)
+        extra_fields.setdefault("is_superuser", True)
 
+        if extra_fields.get("is_staff") is not True:
+            raise ValueError(
+                "El superusuario debe tener is_staff=True."
+            )
 
+        if extra_fields.get("is_superuser") is not True:
+            raise ValueError(
+                "El superusuario debe tener is_superuser=True."
+            )
+
+        return self.create_user(
+            email,
+            full_name,
+            password,
+            **extra_fields,
+        )
 class User(AbstractBaseUser, PermissionsMixin):
+    class Roles(models.TextChoices):
+        BUSINESS_OWNER = "business_owner", "Propietario"
+        BUSINESS_ADMIN = "business_admin", "Administrador"
+
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     full_name = models.CharField(max_length=255)
     phone = models.CharField(max_length=20, blank=True, null=True)
     email = models.EmailField(unique=True)
-    role = models.CharField(max_length=50)
+    role = models.CharField(max_length=50, choices=Roles.choices, default=Roles.BUSINESS_OWNER)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
@@ -67,11 +110,21 @@ class ProductCategory(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name="categories")
     name = models.CharField(max_length=255)
-    class Meta:
-        unique_together = [("business", "name")]
+    status = models.ForeignKey(EntityStatus, on_delete=models.PROTECT)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["business", "name"],
+                name="unique_category_name_per_business",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["business", "status"]),
+        ]
+        
     def __str__(self):
         return self.name
     
@@ -106,6 +159,20 @@ class ProductVariantType(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variant_types')
     name = models.CharField(max_length=255)
+    status = models.ForeignKey(
+        EntityStatus,
+        on_delete=models.PROTECT,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "name"],
+                name="unique_variant_type_per_product",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.product.title} - {self.name}"
@@ -119,9 +186,17 @@ class ProductVariant(models.Model):
     status = models.ForeignKey(EntityStatus, on_delete=models.PROTECT)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
     class Meta:
         constraints = [
-            models.CheckConstraint(check=models.Q(stock__gte=0), name="variant_stock_gte_0"),
+            models.CheckConstraint(
+                condition=models.Q(stock__gte=0),
+                name="variant_stock_gte_0",
+            ),
+            models.UniqueConstraint(
+                fields=["variant_type", "label"],
+                name="unique_variant_label_per_type",
+            ),
         ]
 
     def __str__(self):
@@ -132,16 +207,27 @@ class Employee(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='employees')
     full_name = models.CharField(max_length=255)
-    phone = models.CharField(max_length=50)
-    role = models.CharField(max_length=100)
+    phone = models.CharField(max_length=50, blank=True)
+    position = models.CharField(max_length=100)
     status = models.ForeignKey(EntityStatus, on_delete=models.PROTECT)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["business", "status"]),
+            models.Index(fields=["business", "full_name"]),
+        ]
+
     def __str__(self):
-        biz = f" · {self.business.business_name}" if self.business_id else ""
-        role = f" · {self.role}" if self.role else ""
-        return f"{self.full_name}{role}{biz}"
+        business_name = (
+            f" · {self.business.business_name}"
+            if self.business_id
+            else ""
+        )
+        position = f" · {self.position}" if self.position else ""
+
+        return f"{self.full_name}{position}{business_name}"
     
 class Customer(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
@@ -197,18 +283,28 @@ class Transaction(models.Model):
     concept = models.TextField(blank=True)
     total_value = models.DecimalField(max_digits=12, decimal_places=2)
     status = models.ForeignKey('EntityStatus', on_delete=models.PROTECT)
-    invoice_number = models.CharField(max_length=100, blank=True)
+    invoice_number = models.CharField(max_length=100, blank=True, null=True)
     payment_status = models.CharField(max_length=50, blank=True)
-    invoice_series = models.CharField(max_length=50, blank=True)
+    invoice_series = models.CharField(max_length=50, blank=True, null=True)
     invoice_file_url = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_transactions")
+    updated_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="updated_transactions", null=True, blank=True)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=['business', 'invoice_series', 'invoice_number'],
-                name='uniq_invoice_per_business'
+                fields=[
+                    "business",
+                    "invoice_series",
+                    "invoice_number",
+                ],
+                condition=(
+                    Q(invoice_number__isnull=False)
+                    & ~Q(invoice_number="")
+                ),
+                name="unique_invoice_per_business_when_present",
             ),
             models.CheckConstraint(
                 check=Q(total_value__gte=0),
@@ -229,19 +325,31 @@ class TransactionDetail(models.Model):
     transaction = models.ForeignKey(Transaction, on_delete=models.CASCADE, related_name='details')
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     variant = models.ForeignKey(ProductVariant, on_delete=models.SET_NULL, null=True, blank=True)
-    quantity = models.IntegerField()
+    quantity = models.PositiveIntegerField()
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
     total_price = models.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(quantity__gt=0),
+                name="transaction_detail_quantity_gt_0",
+            ),
+            models.CheckConstraint(
+                condition=Q(unit_price__gte=0),
+                name="transaction_detail_unit_price_gte_0",
+            ),
+            models.CheckConstraint(
+                condition=Q(total_price__gte=0),
+                name="transaction_detail_total_price_gte_0",
+            ),
+        ]
 
     def save(self, *args, **kwargs):
         if self.unit_price is not None and self.quantity is not None:
             self.total_price = self.unit_price * self.quantity
+
         super().save(*args, **kwargs)
-    
-    def __str__(self):
-        prod = self.product.title
-        qty = f"x{self.quantity}"
-        return f"{prod} {qty} · Tx {self.transaction.public_id}"
     
 class Notification(models.Model):
     NOTIFICATION_TYPES = [
@@ -284,7 +392,7 @@ class Reminder(models.Model):
     
 class Debt(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
-    transaction = models.ForeignKey('Transaction', on_delete=models.CASCADE, related_name='debts')
+    transaction = models.OneToOneField(Transaction, on_delete=models.CASCADE, related_name='debts')
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
     paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     interest_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
@@ -293,6 +401,30 @@ class Debt(models.Model):
     is_settled = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(total_amount__gte=0),
+                name="debt_total_amount_gte_0",
+            ),
+            models.CheckConstraint(
+                condition=Q(paid_amount__gte=0),
+                name="debt_paid_amount_gte_0",
+            ),
+            models.CheckConstraint(
+                condition=Q(paid_amount__lte=models.F("total_amount")),
+                name="debt_paid_not_greater_than_total",
+            ),
+            models.CheckConstraint(
+                condition=Q(interest_rate__gte=0),
+                name="debt_interest_rate_gte_0",
+            ),
+            models.CheckConstraint(
+                condition=Q(term_months__gte=0),
+                name="debt_term_months_gte_0",
+            ),
+        ]
 
     def __str__(self):
         ratio = f"{self.paid_amount}/{self.total_amount}"
@@ -304,11 +436,18 @@ class DebtPayment(models.Model):
     debt = models.ForeignKey('Debt', on_delete=models.CASCADE, related_name='payments')
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     payment_date = models.DateField()
-    method = models.CharField(max_length=50)
     transaction = models.ForeignKey('Transaction', on_delete=models.SET_NULL, null=True, blank=True, related_name='debt_payments')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    payment_method = models.ForeignKey('PaymentMethod', on_delete=models.PROTECT, related_name='debt_payments')
+    payment_method = models.ForeignKey(PaymentMethod, on_delete=models.PROTECT, related_name='debt_payments')
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(amount__gt=0),
+                name="debt_payment_amount_gt_0",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.amount} on {self.payment_date} · Debt {self.debt.public_id}"
@@ -383,17 +522,37 @@ class CashRegister(models.Model):
 
 class ActivityLog(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
-    user = models.ForeignKey('User', on_delete=models.SET_NULL, null=True, blank=True, related_name='activity_logs')
-    action = models.TextField()
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='activity_logs')
+    business = models.ForeignKey(Business, on_delete=models.SET_NULL, null=True, blank=True, related_name="activity_logs")
+    action = models.CharField(max_length=50)
     entity_type = models.CharField(max_length=100)
-    entity_id = models.IntegerField(null=True, blank=True)
+    entity_id = models.CharField( max_length=100, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["business", "created_at"],
+            ),
+            models.Index(
+                fields=["user", "created_at"],
+            ),
+            models.Index(
+                fields=["entity_type", "entity_id"],
+            ),
+        ]
+        ordering = ["-created_at"]
 
     def __str__(self):
         who = self.user.email if self.user_id else "system"
-        ent = f"{self.entity_type}#{self.entity_id}" if self.entity_type else "N/A"
-        return f"{self.action} {ent} by {who}"
+        entity = (
+            f"{self.entity_type}#{self.entity_id}"
+            if self.entity_id
+            else self.entity_type
+        )
+
+        return f"{self.action} {entity} by {who}"
 
 class StockMovement(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
@@ -405,10 +564,25 @@ class StockMovement(models.Model):
     quantity = models.IntegerField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_stock_movements")
     transaction_detail = models.ForeignKey(
         'TransactionDetail', on_delete=models.SET_NULL, null=True, blank=True,
         related_name='stock_movements'
     )
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=~Q(quantity=0),
+                name="stock_movement_quantity_not_zero",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["product", "created_at"]),
+            models.Index(fields=["transaction", "created_at"]),
+            models.Index(fields=["variant", "created_at"]),
+        ]
+        ordering = ["-created_at"]
     
     def __str__(self):
         qty = f"{self.quantity:+d}"
