@@ -1,4 +1,4 @@
-from django.core.exceptions import FieldDoesNotExist
+from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist
 from rest_framework import viewsets, mixins, status
 from rest_framework.views import APIView
 from rest_framework.decorators import action, api_view, permission_classes, throttle_classes
@@ -61,6 +61,8 @@ class RegisterViewSet(mixins.CreateModelMixin, viewsets.GenericViewSet):
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_register"
 
 # -------- Base mixin para filtrar por usuario --------
 
@@ -179,8 +181,6 @@ class BusinessScopedViewSet(viewsets.ModelViewSet):
         user = self.request.user
         extra = {}
 
-        # Para modelos como Business, el propietario siempre será
-        # el usuario autenticado, excepto para un superusuario.
         if self._model_has_field(model_cls, "user"):
             submitted_user = serializer.validated_data.get("user")
 
@@ -189,8 +189,6 @@ class BusinessScopedViewSet(viewsets.ModelViewSet):
             else:
                 extra["user"] = user
 
-        # Evita crear productos, clientes, deudas, etc. dentro
-        # de un negocio perteneciente a otro usuario.
         if self._model_has_field(model_cls, "business"):
             business = serializer.validated_data.get("business")
 
@@ -200,6 +198,8 @@ class BusinessScopedViewSet(viewsets.ModelViewSet):
                 )
 
             self._validate_business_access(business)
+
+        self._validate_owner_relation(serializer)
 
         if (
             self._model_has_field(model_cls, "status")
@@ -229,20 +229,19 @@ class BusinessScopedViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         model_cls = serializer.Meta.model
 
-        # Evita cambiar el propietario directo de un registro.
         if (
             self._model_has_field(model_cls, "user")
             and not self._is_platform_admin(self.request.user)
         ):
             serializer.validated_data.pop("user", None)
 
-        # Evita mover un producto, deuda, cliente, etc.
-        # hacia un negocio ajeno.
         if self._model_has_field(model_cls, "business"):
             new_business = serializer.validated_data.get("business")
 
             if new_business is not None:
                 self._validate_business_access(new_business)
+
+        self._validate_owner_relation(serializer)
 
         obj = serializer.save()
 
@@ -264,6 +263,80 @@ class BusinessScopedViewSet(viewsets.ModelViewSet):
             instance.__class__.__name__,
             instance.pk,
         )
+
+    def _validate_owner_relation(self, serializer, ) -> None:
+        """
+        Valida relaciones indirectas usando owner_lookup.
+
+        Ejemplos:
+
+        ProductVariantType:
+            owner_lookup = "product__business__user"
+
+            product
+            └── business
+                └── user
+
+        ProductVariant:
+            owner_lookup = "variant_type__product__business__user"
+
+            variant_type
+            └── product
+                └── business
+                    └── user
+        """
+        user = self.request.user
+
+        if self._is_platform_admin(user):
+            return
+
+        owner_lookup = getattr(
+            self,
+            "owner_lookup",
+            None,
+        )
+
+        if not owner_lookup:
+            return
+
+        lookup_parts = owner_lookup.split("__")
+
+        # owner_lookup="user" no tiene una relación indirecta
+        # que debamos recorrer.
+        if len(lookup_parts) < 2:
+            return
+
+        relation_field = lookup_parts[0]
+
+        related_object = serializer.validated_data.get(
+            relation_field
+        )
+
+        # En PATCH la relación podría no venir.
+        if related_object is None:
+            return
+
+        current_object = related_object
+
+        try:
+            for attribute in lookup_parts[1:]:
+                current_object = getattr(
+                    current_object,
+                    attribute,
+                )
+        except (AttributeError, ObjectDoesNotExist):
+            raise PermissionDenied(
+                "No se pudo validar el propietario del recurso relacionado."
+            )
+
+        # El último elemento de todos nuestros owner_lookup
+        # debe resolver al objeto User.
+        related_user = current_object
+
+        if related_user is None or related_user.pk != user.pk:
+            raise PermissionDenied(
+                "No tienes permiso para utilizar el recurso relacionado."
+            )
 # -------- ViewSets --------
 
 @extend_schema_view(
@@ -350,7 +423,7 @@ class ProductViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     destroy=extend_schema(tags=["Product Variant Types"]),
 )
 class ProductVariantTypeViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
-    queryset = ProductVariantType.objects.select_related("product").all()
+    queryset = ProductVariantType.objects.select_related("product", "product__business", "status").order_by("-created_at", "-id")
     serializer_class = ProductVariantTypeSerializer
 
     owner_lookup = "product__business__user"
@@ -369,7 +442,7 @@ class ProductVariantTypeViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     destroy=extend_schema(tags=["Product Variants"]),
 )
 class ProductVariantViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
-    queryset = ProductVariant.objects.select_related("variant_type", "variant_type__product").all()
+    queryset = ProductVariant.objects.select_related("variant_type", "variant_type__product", "variant_type__product__business", "status").order_by("-created_at", "-id")
     serializer_class = ProductVariantSerializer
 
     owner_lookup = "variant_type__product__business__user"
@@ -460,6 +533,7 @@ class SupplierViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     destroy=extend_schema(tags=["Payment Methods"]),
 )
 class PaymentMethodViewSet(SoftDeleteByStatusMixin, viewsets.ModelViewSet):
+    viewsets.ReadOnlyModelViewSet
     queryset = PaymentMethod.objects.all()
     serializer_class = PaymentMethodSerializer
     permission_classes = [IsAuthenticated]
@@ -539,57 +613,106 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 
     @db_tx.atomic
     def perform_create(self, serializer):
-        tx = serializer.save()
+        business = serializer.validated_data.get("business")
+
+        if business is None:
+            raise PermissionDenied(
+                "Debes indicar un negocio válido."
+            )
+
+        self._validate_business_access(business)
+
+        tx = serializer.save(
+            created_by=self.request.user,
+        )
+
         sign = self._sign_for_tx(tx.type)
 
         if sign is not None:
             rows = []
-            for d in tx.details.select_related("product", "variant").all():
-                product, variant, qty = d.product, d.variant, d.quantity
 
-                # Validación + actualización de stock
-                if tx.type == "sale":
-                    if variant:
-                        v = ProductVariant.objects.select_for_update().get(pk=variant.pk)
-                        if v.stock < qty:
-                            raise ValidationError({"details": f"Stock insuficiente en variante {v.label}"})
-                        v.stock -= qty
-                        v.save(update_fields=["stock"])
-                    else:
-                        p = Product.objects.select_for_update().get(pk=product.pk)
-                        if p.stock < qty:
-                            raise ValidationError({"details": f"Stock insuficiente en producto {p.title}"})
-                        p.stock -= qty
-                        p.save(update_fields=["stock"])
-                elif tx.type == "purchase":
-                    if variant:
-                        v = ProductVariant.objects.select_for_update().get(pk=variant.pk)
-                        v.stock += qty
-                        v.save(update_fields=["stock"])
-                    else:
-                        p = Product.objects.select_for_update().get(pk=product.pk)
-                        p.stock += qty
-                        p.save(update_fields=["stock"])
+            for detail in tx.details.select_related(
+                "product",
+                "variant",
+            ):
+                product = detail.product
+                variant = detail.variant
+                quantity = detail.quantity
 
-                # Movimiento
-                rows.append(StockMovement(
-                    product=product,
-                    variant=variant,
-                    transaction=tx,
-                    type="sale" if sign == -1 else "entry",
-                    quantity=sign * qty,
-                    note=f"Auto base from {tx.type} {tx.public_id}",
-                ))
+                if variant is not None:
+                    stock_target = (
+                        ProductVariant.objects
+                        .select_for_update()
+                        .get(pk=variant.pk)
+                    )
+                else:
+                    stock_target = (
+                        Product.objects
+                        .select_for_update()
+                        .get(pk=product.pk)
+                    )
+
+                new_stock = stock_target.stock + (
+                    sign * quantity
+                )
+
+                if new_stock < 0:
+                    resource = (
+                        variant.label
+                        if variant is not None
+                        else product.title
+                    )
+
+                    raise ValidationError({
+                        "details": (
+                            f"Stock insuficiente en {resource}."
+                        )
+                    })
+
+                stock_target.stock = new_stock
+                stock_target.save(
+                    update_fields=["stock"]
+                )
+
+                rows.append(
+                    StockMovement(
+                        product=product,
+                        variant=variant,
+                        transaction=tx,
+                        type=(
+                            "sale"
+                            if sign == -1
+                            else "entry"
+                        ),
+                        quantity=sign * quantity,
+                        note=(
+                            f"Auto base from "
+                            f"{tx.type} {tx.public_id}"
+                        ),
+                    )
+                )
 
             if rows:
                 StockMovement.objects.bulk_create(rows)
 
-        log_action(self.request.user, "CREATE", tx.__class__.__name__, tx.pk)
-        return tx
-
+        log_action(
+            self.request.user,
+            "CREATE",
+            tx.__class__.__name__,
+            tx.pk,
+        )
+    
     @db_tx.atomic
     def perform_update(self, serializer):
-        tx = serializer.save()
+        business = serializer.validated_data.get("business")
+
+        if business is not None:
+            self._validate_business_access(business)
+
+        tx = serializer.save(
+            updated_by=self.request.user,
+        )
+        
         sign = self._sign_for_tx(tx.type)  # sale:-1, purchase:+1, expense:None
 
         # Si AHORA no debería afectar inventario (expense), neutraliza todo lo previo.
@@ -715,12 +838,42 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
             if total_qty:
                 # revertir existencias
                 if vid:
-                    variant = ProductVariant.objects.select_for_update().get(pk=vid)
-                    variant.stock -= total_qty
+                    variant = (
+                        ProductVariant.objects
+                        .select_for_update()
+                        .get(pk=vid)
+                    )
+
+                    new_stock = variant.stock - total_qty
+
+                    if new_stock < 0:
+                        raise ValidationError({
+                            "details": (
+                                "No se puede eliminar la transacción porque "
+                                "dejaría stock negativo en una variante."
+                            )
+                        })
+
+                    variant.stock = new_stock
                     variant.save(update_fields=["stock"])
                 else:
-                    product = Product.objects.select_for_update().get(pk=pid)
-                    product.stock -= total_qty
+                    product = (
+                        Product.objects
+                        .select_for_update()
+                        .get(pk=pid)
+                    )
+
+                    new_stock = product.stock - total_qty
+
+                    if new_stock < 0:
+                        raise ValidationError({
+                            "details": (
+                                "No se puede eliminar la transacción porque "
+                                "dejaría stock negativo en un producto."
+                            )
+                        })
+
+                    product.stock = new_stock
                     product.save(update_fields=["stock"])
 
                 to_movs.append(StockMovement(

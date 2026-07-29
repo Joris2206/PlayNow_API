@@ -1,7 +1,10 @@
+from decimal import Decimal
+
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 import uuid
 from django.db.models import Q
+from django.db.models.functions import Lower
 
 # Opcional: Custom user manager
 class UserManager(BaseUserManager):
@@ -258,8 +261,31 @@ class Supplier(models.Model):
         return f"{self.name}{phone}"
     
 class PaymentMethod(models.Model):
-    public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
-    name = models.CharField(max_length=100, unique=True)
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        db_index=True,
+        editable=False,
+    )
+
+    business = models.ForeignKey(
+        "Business",
+        on_delete=models.CASCADE,
+        related_name="payment_methods",
+    )
+
+    name = models.CharField(
+        max_length=100,
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                Lower("name"),
+                "business",
+                name="unique_payment_method_per_business",
+            ),
+        ]
 
     def __str__(self):
         return self.name
@@ -271,6 +297,12 @@ class Transaction(models.Model):
         ('purchase', 'Purchase'),
         ('expense', 'Expense'),
     ]
+    PAYMENT_STATUSES = [
+        ("paid", "Paid"),
+        ("partial", "Partial"),
+        ("pending", "Pending"),
+    ]
+
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     business = models.ForeignKey('Business', on_delete=models.CASCADE, related_name='transactions')
     customer = models.ForeignKey('Customer', on_delete=models.SET_NULL, null=True, blank=True, related_name='transactions')
@@ -284,7 +316,7 @@ class Transaction(models.Model):
     total_value = models.DecimalField(max_digits=12, decimal_places=2)
     status = models.ForeignKey('EntityStatus', on_delete=models.PROTECT)
     invoice_number = models.CharField(max_length=100, blank=True, null=True)
-    payment_status = models.CharField(max_length=50, blank=True)
+    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUSES, default="paid")
     invoice_series = models.CharField(max_length=50, blank=True, null=True)
     invoice_file_url = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -307,8 +339,34 @@ class Transaction(models.Model):
                 name="unique_invoice_per_business_when_present",
             ),
             models.CheckConstraint(
-                check=Q(total_value__gte=0),
-                name='chk_total_value_non_negative'
+                condition=Q(total_value__gte=0),
+                name="transaction_total_value_gte_0",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(discount_percent__isnull=True)
+                    | (
+                        Q(discount_percent__gte=0)
+                        & Q(discount_percent__lte=100)
+                    )
+                ),
+                name="transaction_discount_between_0_and_100",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(
+                        payment_status="paid",
+                        is_debt=False,
+                    )
+                    | Q(
+                        payment_status__in=[
+                            "partial",
+                            "pending",
+                        ],
+                        is_debt=True,
+                    )
+                ),
+                name="transaction_payment_status_matches_debt",
             ),
         ]
 
@@ -346,8 +404,34 @@ class TransactionDetail(models.Model):
         ]
 
     def save(self, *args, **kwargs):
-        if self.unit_price is not None and self.quantity is not None:
-            self.total_price = self.unit_price * self.quantity
+        should_recalculate = (
+            self.unit_price is not None
+            and self.quantity is not None
+        )
+
+        if should_recalculate:
+            self.total_price = (
+                self.unit_price
+                * self.quantity
+            ).quantize(
+                Decimal("0.01")
+            )
+
+        update_fields = kwargs.get("update_fields")
+
+        if (
+            update_fields is not None
+            and should_recalculate
+            and (
+                "quantity" in update_fields
+                or "unit_price" in update_fields
+            )
+        ):
+            update_fields = set(update_fields)
+            update_fields.add("total_price")
+            kwargs["update_fields"] = list(
+                update_fields
+            )
 
         super().save(*args, **kwargs)
     
