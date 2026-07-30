@@ -1,8 +1,14 @@
+import uuid
 from decimal import Decimal
 
+from django.conf import settings
+from django.contrib.auth.models import (
+    AbstractBaseUser,
+    BaseUserManager,
+    PermissionsMixin,
+)
+from django.core.exceptions import ValidationError
 from django.db import models
-from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
-import uuid
 from django.db.models import Q
 from django.db.models.functions import Lower
 
@@ -21,7 +27,7 @@ class UserManager(BaseUserManager):
         if not full_name:
             raise ValueError("El nombre completo es obligatorio.")
 
-        email = self.normalize_email(email)
+        email = self.normalize_email(email).strip().lower()
 
         user = self.model(
             email=email,
@@ -64,8 +70,17 @@ class UserManager(BaseUserManager):
         )
 class User(AbstractBaseUser, PermissionsMixin):
     class Roles(models.TextChoices):
+        """
+        Rol global/legado de la cuenta.
+
+        Los permisos dentro de cada negocio se controlan mediante
+        BusinessMembership.role. Este campo se mantiene para compatibilidad
+        con autenticación, panel administrativo y código existente.
+        """
+
         BUSINESS_OWNER = "business_owner", "Propietario"
         BUSINESS_ADMIN = "business_admin", "Administrador"
+        EMPLOYEE = "employee", "Colaborador"
 
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     full_name = models.CharField(max_length=255)
@@ -101,6 +116,161 @@ class Business(models.Model):
         cur = f" · {self.currency}" if self.currency else ""
         return f"{self.business_name}{cur}"
 
+    def has_active_member(self, user, roles=None) -> bool:
+        """
+        Indica si un usuario posee una membresía activa en este negocio.
+
+        `roles` puede ser None o una colección de roles de
+        BusinessMembership.
+        """
+        if user is None or not user.is_authenticated:
+            return False
+
+        if user.is_superuser:
+            return True
+
+        memberships = self.memberships.filter(
+            user=user,
+            is_active=True,
+        )
+
+        if roles is not None:
+            memberships = memberships.filter(
+                role__in=roles,
+            )
+
+        return memberships.exists()
+
+
+class BusinessMembership(models.Model):
+    ROLE_OWNER = "owner"
+    ROLE_ADMIN = "admin"
+    ROLE_CASHIER = "cashier"
+    ROLE_SELLER = "seller"
+    ROLE_INVENTORY = "inventory"
+    ROLE_VIEWER = "viewer"
+
+    ROLES = [
+        (ROLE_OWNER, "Propietario"),
+        (ROLE_ADMIN, "Administrador"),
+        (ROLE_CASHIER, "Cajero"),
+        (ROLE_SELLER, "Vendedor"),
+        (ROLE_INVENTORY, "Inventario"),
+        (ROLE_VIEWER, "Solo lectura"),
+    ]
+
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        db_index=True,
+        editable=False,
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="business_memberships",
+    )
+
+    business = models.ForeignKey(
+        "Business",
+        on_delete=models.CASCADE,
+        related_name="memberships",
+    )
+
+    employee = models.OneToOneField(
+        "Employee",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="membership",
+    )
+
+    role = models.CharField(
+        max_length=20,
+        choices=ROLES,
+    )
+
+    is_active = models.BooleanField(
+        default=True,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "user",
+                    "business",
+                ],
+                name="unique_user_membership_per_business",
+            ),
+            models.UniqueConstraint(
+                fields=[
+                    "business",
+                    "employee",
+                ],
+                condition=Q(employee__isnull=False),
+                name="unique_employee_membership_per_business",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["user", "is_active"],
+                name="membership_user_active_idx",
+            ),
+            models.Index(
+                fields=["business", "is_active"],
+                name="membership_business_active_idx",
+            ),
+            models.Index(
+                fields=["business", "role", "is_active"],
+                name="membership_role_active_idx",
+            ),
+        ]
+        ordering = ["business_id", "role", "created_at"]
+
+    def clean(self):
+        super().clean()
+
+        if (
+            self.employee_id is not None
+            and self.business_id is not None
+            and self.employee.business_id != self.business_id
+        ):
+            raise ValidationError({
+                "employee": (
+                    "El empleado debe pertenecer al mismo "
+                    "negocio que la membresía."
+                )
+            })
+
+        if (
+            self.role == self.ROLE_OWNER
+            and self.employee_id is not None
+        ):
+            # El propietario puede tener un Employee asociado, pero no es
+            # obligatorio. No se rechaza; esta condición queda documentada
+            # para mantener el modelo flexible.
+            pass
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return (
+            f"{self.user} · "
+            f"{self.business} · "
+            f"{self.get_role_display()}"
+        )
 
 class EntityStatus(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
@@ -209,28 +379,19 @@ class ProductVariant(models.Model):
 class Employee(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='employees')
-    full_name = models.CharField(max_length=255)
-    phone = models.CharField(max_length=50, blank=True)
+    full_name = models.CharField(max_length=200)
     position = models.CharField(max_length=100)
+    phone = models.CharField(max_length=30, blank=True)
+    email = models.EmailField(blank=True)
     status = models.ForeignKey(EntityStatus, on_delete=models.PROTECT)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
-        indexes = [
-            models.Index(fields=["business", "status"]),
-            models.Index(fields=["business", "full_name"]),
-        ]
-
     def __str__(self):
-        business_name = (
-            f" · {self.business.business_name}"
-            if self.business_id
-            else ""
+        return (
+            f"{self.full_name} - "
+            f"{self.position}"
         )
-        position = f" · {self.position}" if self.position else ""
-
-        return f"{self.full_name}{position}{business_name}"
     
 class Customer(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
@@ -278,6 +439,22 @@ class PaymentMethod(models.Model):
         max_length=100,
     )
 
+    status = models.ForeignKey(
+        "EntityStatus",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="payment_methods",
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+    )
+
     class Meta:
         constraints = [
             models.UniqueConstraint(
@@ -286,6 +463,13 @@ class PaymentMethod(models.Model):
                 name="unique_payment_method_per_business",
             ),
         ]
+        indexes = [
+            models.Index(
+                fields=["business", "status"],
+                name="paymethod_biz_status_idx",
+            ),
+        ]
+        ordering = ["name"]
 
     def __str__(self):
         return self.name
@@ -402,6 +586,34 @@ class TransactionDetail(models.Model):
                 name="transaction_detail_total_price_gte_0",
             ),
         ]
+
+    def clean(self):
+        super().clean()
+
+        if (
+            self.transaction_id
+            and self.product_id
+            and self.transaction.business_id
+            != self.product.business_id
+        ):
+            raise ValidationError({
+                "product": (
+                    "El producto debe pertenecer al mismo negocio "
+                    "de la transacción."
+                )
+            })
+
+        if (
+            self.variant_id
+            and self.product_id
+            and self.variant.variant_type.product_id
+            != self.product_id
+        ):
+            raise ValidationError({
+                "variant": (
+                    "La variante seleccionada no pertenece al producto."
+                )
+            })
 
     def save(self, *args, **kwargs):
         should_recalculate = (
@@ -532,6 +744,42 @@ class DebtPayment(models.Model):
                 name="debt_payment_amount_gt_0",
             ),
         ]
+        indexes = [
+            models.Index(
+                fields=["debt", "payment_date"],
+                name="debt_payment_debt_date_idx",
+            ),
+        ]
+        ordering = ["-payment_date", "-created_at"]
+
+    def clean(self):
+        super().clean()
+
+        if (
+            self.debt_id
+            and self.payment_method_id
+            and self.debt.transaction.business_id
+            != self.payment_method.business_id
+        ):
+            raise ValidationError({
+                "payment_method": (
+                    "El método de pago debe pertenecer al mismo "
+                    "negocio de la deuda."
+                )
+            })
+
+        if (
+            self.debt_id
+            and self.transaction_id
+            and self.debt.transaction.business_id
+            != self.transaction.business_id
+        ):
+            raise ValidationError({
+                "transaction": (
+                    "La transacción asociada al pago debe pertenecer "
+                    "al mismo negocio de la deuda."
+                )
+            })
 
     def __str__(self):
         return f"{self.amount} on {self.payment_date} · Debt {self.debt.public_id}"
@@ -600,9 +848,37 @@ class CashRegister(models.Model):
                                     name="one_open_register_per_business"),
         ]
 
+    def clean(self):
+        super().clean()
+
+        if (
+            self.employee_id
+            and self.business_id
+            and self.employee.business_id != self.business_id
+        ):
+            raise ValidationError({
+                "employee": (
+                    "El empleado debe pertenecer al mismo negocio "
+                    "de la caja."
+                )
+            })
+
+        if (
+            self.close_time is not None
+            and self.open_time is not None
+            and self.close_time < self.open_time
+        ):
+            raise ValidationError({
+                "close_time": (
+                    "La fecha de cierre no puede ser anterior "
+                    "a la apertura."
+                )
+            })
+
     def __str__(self):
         who = f"{self.employee.full_name}" if self.employee_id else "N/A"
         return f"{self.business.business_name} · {who} · {self.status}"
+
 
 class ActivityLog(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)

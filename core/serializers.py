@@ -2,10 +2,9 @@ from decimal import Decimal
 
 from django.db import transaction as db_tx
 from django.utils import timezone
-from django.views.generic import detail
 from rest_framework import serializers
 from .models import (
-    User, Business, EntityStatus,
+    BusinessMembership, User, Business, EntityStatus,
     ProductCategory, Product, ProductVariantType, ProductVariant,
     Employee, Customer, Supplier, PaymentMethod,
     Transaction, TransactionDetail, StockMovement,
@@ -17,7 +16,7 @@ from .models import (
 
 class HealthSerializer(serializers.Serializer):
     status = serializers.CharField()
-    version = serializers.CharField()
+    service = serializers.CharField()
     
 # ---------- Usuarios ----------
 class UserSerializer(serializers.ModelSerializer):
@@ -42,6 +41,117 @@ class RegisterSerializer(serializers.ModelSerializer):
             role=User.Roles.BUSINESS_OWNER
         )
 
+class EmployeeAccessCreateSerializer(serializers.Serializer):
+    """
+    Crea en una sola operación:
+
+    - La cuenta User del colaborador.
+    - Su registro Employee dentro del negocio.
+    - La BusinessMembership que controla su acceso y permisos.
+
+    Este serializer no devuelve tokens. El colaborador debe autenticarse
+    posteriormente mediante el endpoint normal de login.
+    """
+
+    email = serializers.EmailField()
+    password = serializers.CharField(
+        write_only=True,
+        min_length=8,
+        trim_whitespace=False,
+    )
+    full_name = serializers.CharField(max_length=255)
+    position = serializers.CharField(max_length=100)
+    phone = serializers.CharField(
+        max_length=50,
+        required=False,
+        allow_blank=True,
+        default="",
+    )
+    role = serializers.ChoiceField(
+        choices=[
+            (BusinessMembership.ROLE_ADMIN, "Administrador"),
+            (BusinessMembership.ROLE_CASHIER, "Cajero"),
+            (BusinessMembership.ROLE_SELLER, "Vendedor"),
+            (BusinessMembership.ROLE_INVENTORY, "Inventario"),
+            (BusinessMembership.ROLE_VIEWER, "Solo lectura"),
+        ]
+    )
+
+    def validate_email(self, value):
+        email = value.strip().lower()
+
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError(
+                "Ya existe un usuario con este correo."
+            )
+
+        return email
+
+    def validate(self, attrs):
+        business = self.context.get("business")
+
+        if business is None:
+            raise serializers.ValidationError({
+                "business": "No se proporcionó un negocio válido."
+            })
+
+        return attrs
+
+    @db_tx.atomic
+    def create(self, validated_data):
+        business = self.context["business"]
+        password = validated_data.pop("password")
+        membership_role = validated_data.pop("role")
+        email = validated_data.pop("email")
+        full_name = validated_data.pop("full_name")
+        phone = validated_data.pop("phone", "")
+        position = validated_data.pop("position")
+
+        active_status = EntityStatus.objects.filter(
+            name__iexact="Activo"
+        ).first()
+
+        if active_status is None:
+            raise serializers.ValidationError({
+                "status": (
+                    "No existe el estado inicial 'Activo'. "
+                    "Ejecuta el comando seed_statuses."
+                )
+            })
+
+        # User.role se conserva por compatibilidad con el modelo actual.
+        # La autorización real dentro del negocio depende exclusivamente
+        # de BusinessMembership.role.
+        legacy_user_role = getattr(
+            getattr(User, "Roles", None),
+            "EMPLOYEE",
+            "employee",
+        )
+
+        user = User.objects.create_user(
+            email=email,
+            full_name=full_name,
+            password=password,
+            phone=phone,
+            role=legacy_user_role,
+        )
+
+        employee = Employee.objects.create(
+            business=business,
+            full_name=full_name,
+            phone=phone,
+            position=position,
+            status=active_status,
+        )
+
+        return BusinessMembership.objects.create(
+            user=user,
+            business=business,
+            employee=employee,
+            role=membership_role,
+            is_active=True,
+        )
+
 # ---------- Catálogos/Estados ----------
 class EntityStatusSerializer(serializers.ModelSerializer):
     class Meta:
@@ -51,7 +161,12 @@ class EntityStatusSerializer(serializers.ModelSerializer):
 class PaymentMethodSerializer(serializers.ModelSerializer):
     class Meta:
         model = PaymentMethod
-        fields = ("public_id", "name")
+        fields = (
+            "public_id",
+            "business",
+            "name",
+        )
+        read_only_fields = ("public_id",)
 
 # ---------- Business ----------
 class BusinessSerializer(serializers.ModelSerializer):
@@ -78,11 +193,207 @@ class BusinessSerializer(serializers.ModelSerializer):
 
         return super().create(validated_data)
 
+class BusinessMembershipSerializer(
+    serializers.ModelSerializer
+):
+    user_email = serializers.EmailField(
+        source="user.email",
+        read_only=True,
+    )
+
+    business_name = serializers.CharField(
+        source="business.business_name",
+        read_only=True,
+    )
+
+    employee_name = serializers.CharField(
+        source="employee.full_name",
+        read_only=True,
+        allow_null=True,
+    )
+
+    role_display = serializers.CharField(
+        source="get_role_display",
+        read_only=True,
+    )
+
+    class Meta:
+        model = BusinessMembership
+
+        fields = [
+            "public_id",
+            "user_email",
+            "business",
+            "business_name",
+            "employee",
+            "employee_name",
+            "role",
+            "role_display",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+
+        read_only_fields = [
+            "public_id",
+            "user_email",
+            "business",
+            "business_name",
+            "employee",
+            "employee_name",
+            "role_display",
+            "created_at",
+            "updated_at",
+        ]
+
+class BusinessMembershipUpdateSerializer(
+    serializers.ModelSerializer
+):
+    role = serializers.ChoiceField(
+        choices=[
+            (
+                BusinessMembership.ROLE_ADMIN,
+                "Administrador",
+            ),
+            (
+                BusinessMembership.ROLE_CASHIER,
+                "Cajero",
+            ),
+            (
+                BusinessMembership.ROLE_SELLER,
+                "Vendedor",
+            ),
+            (
+                BusinessMembership.ROLE_INVENTORY,
+                "Inventario",
+            ),
+            (
+                BusinessMembership.ROLE_VIEWER,
+                "Solo lectura",
+            ),
+        ],
+        required=False,
+    )
+
+    is_active = serializers.BooleanField(
+        required=False,
+    )
+
+    class Meta:
+        model = BusinessMembership
+
+        fields = (
+            "role",
+            "is_active",
+        )
+
+    def validate(self, attrs):
+        if not attrs:
+            raise serializers.ValidationError(
+                "Debe proporcionar al menos un campo "
+                "para actualizar."
+            )
+
+        request = self.context.get("request")
+        membership = self.instance
+
+        if request is None:
+            raise serializers.ValidationError(
+                "No se encontró el contexto de la solicitud."
+            )
+
+        current_user = request.user
+
+        if membership.user_id == current_user.id:
+            raise serializers.ValidationError(
+                "No puedes modificar tu propia membresía."
+            )
+
+        current_membership = (
+            BusinessMembership.objects
+            .filter(
+                user=current_user,
+                business=membership.business,
+                is_active=True,
+            )
+            .first()
+        )
+
+        if (
+            not current_user.is_superuser
+            and current_membership is None
+        ):
+            raise serializers.ValidationError(
+                "No tienes una membresía activa "
+                "en este negocio."
+            )
+
+        if (
+            not current_user.is_superuser
+            and current_membership.role
+            not in {
+                BusinessMembership.ROLE_OWNER,
+                BusinessMembership.ROLE_ADMIN,
+            }
+        ):
+            raise serializers.ValidationError(
+                "No tienes permiso para administrar "
+                "membresías."
+            )
+
+        if (
+            membership.role
+            == BusinessMembership.ROLE_OWNER
+            and not current_user.is_superuser
+        ):
+            raise serializers.ValidationError(
+                "La membresía del propietario no puede "
+                "modificarse desde este endpoint."
+            )
+
+        requested_role = attrs.get("role")
+
+        if (
+            requested_role
+            == BusinessMembership.ROLE_OWNER
+        ):
+            raise serializers.ValidationError({
+                "role": (
+                    "No se puede asignar el rol de "
+                    "propietario desde este endpoint."
+                )
+            })
+
+        if (
+            not current_user.is_superuser
+            and current_membership.role
+            == BusinessMembership.ROLE_ADMIN
+            and membership.role
+            == BusinessMembership.ROLE_ADMIN
+        ):
+            raise serializers.ValidationError(
+                "Un administrador no puede modificar "
+                "a otro administrador."
+            )
+
+        return attrs
+
 # ---------- Productos ----------
 class ProductCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductCategory
-        fields = ("public_id", "name", "created_at", "updated_at")
+        fields = (
+            "public_id",
+            "business",
+            "name",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "public_id",
+            "created_at",
+            "updated_at",
+        )
 
 class ProductSerializer(serializers.ModelSerializer):
     status = serializers.PrimaryKeyRelatedField(
@@ -98,6 +409,29 @@ class ProductSerializer(serializers.ModelSerializer):
             "created_at", "updated_at"
         )
         read_only_fields = ("public_id", "created_at", "updated_at")
+
+    def validate(self, attrs):
+        business = attrs.get(
+            "business",
+            getattr(self.instance, "business", None),
+        )
+        category = attrs.get(
+            "category",
+            getattr(self.instance, "category", None),
+        )
+
+        if (
+            business is not None
+            and category is not None
+            and category.business_id != business.id
+        ):
+            raise serializers.ValidationError({
+                "category": (
+                    "La categoría no pertenece al negocio seleccionado."
+                )
+            })
+
+        return attrs
 
     def create(self, validated_data):
         if not validated_data.get("status"):
@@ -157,7 +491,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
     )
     class Meta:
         model = Employee
-        fields = ("public_id", "business", "full_name", "phone", "role", "status", "created_at", "updated_at")
+        fields = ("public_id", "business", "full_name", "phone", "position", "status", "created_at", "updated_at")
 
     def create(self, validated_data):
         if not validated_data.get("status"):
@@ -260,6 +594,17 @@ class TransactionSerializer(
         read_only=True,
     )
 
+    created_by_email = serializers.EmailField(
+        source="created_by.email",
+        read_only=True,
+    )
+
+    updated_by_email = serializers.EmailField(
+        source="updated_by.email",
+        read_only=True,
+        allow_null=True,
+    )
+
     class Meta:
         model = Transaction
         fields = (
@@ -282,12 +627,15 @@ class TransactionSerializer(
             "invoice_file_url",
             "details",
             "business_currency",
+            "created_by_email",
+            "updated_by_email",
             "created_at",
             "updated_at",
         )
 
         read_only_fields = (
             "public_id",
+            "employee",
             "total_value",
             "is_debt",
             "created_at",
@@ -371,7 +719,6 @@ class TransactionSerializer(
         related_fields = (
             "customer",
             "supplier",
-            "employee",
             "payment_method",
         )
 
@@ -863,6 +1210,7 @@ class TransactionSerializer(
             due_date=timezone.localdate(),
             is_settled=False,
         )
+
 # ---------- Pagos de Deuda ----------
 class DebtSerializer(serializers.ModelSerializer):
     class Meta:

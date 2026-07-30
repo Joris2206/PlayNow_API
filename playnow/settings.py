@@ -171,6 +171,7 @@ REST_FRAMEWORK = {
         "password_reset": "5/min",
         "public_read": "60/min",
         "admin_write": "120/min",
+        "auth_register": "5/min",
         "auth_reset_request": "5/min",
         "auth_reset_confirm": "10/min",
     },
