@@ -14,6 +14,47 @@ from .models import (
     PaymentsSummary, DebtsSummary, InventorySummary,
 )
 
+
+# ---------- Relaciones mediante public_id ----------
+def public_id_field(model, *, required=True, allow_null=False):
+    """Campo relacional que recibe y devuelve el public_id (UUID)."""
+    return serializers.SlugRelatedField(
+        slug_field="public_id",
+        queryset=model.objects.all(),
+        required=required,
+        allow_null=allow_null,
+    )
+
+
+def public_id_read_only(*, allow_null=False):
+    """Campo relacional de solo lectura representado por public_id."""
+    return serializers.SlugRelatedField(
+        slug_field="public_id",
+        read_only=True,
+        allow_null=allow_null,
+    )
+
+
+def get_active_status():
+    active = EntityStatus.objects.filter(name__iexact="Activo").first()
+    if active is None:
+        raise serializers.ValidationError({
+            "status": (
+                "No existe el estado inicial 'Activo'. "
+                "Ejecuta el comando seed_statuses."
+            )
+        })
+    return active
+
+
+class DefaultActiveStatusMixin:
+    """Asigna el estado Activo cuando el cliente no envía status."""
+
+    def create(self, validated_data):
+        validated_data.setdefault("status", get_active_status())
+        return super().create(validated_data)
+
+
 class HealthSerializer(serializers.Serializer):
     status = serializers.CharField()
     service = serializers.CharField()
@@ -157,61 +198,64 @@ class EntityStatusSerializer(serializers.ModelSerializer):
     class Meta:
         model = EntityStatus
         fields = ("public_id", "name")
+        read_only_fields = ("public_id",)
 
-class PaymentMethodSerializer(serializers.ModelSerializer):
+class PaymentMethodSerializer(
+    DefaultActiveStatusMixin,
+    serializers.ModelSerializer,
+):
+    business = public_id_field(Business)
+    status = public_id_field(EntityStatus, required=False)
+
     class Meta:
         model = PaymentMethod
         fields = (
             "public_id",
             "business",
             "name",
+            "status",
         )
         read_only_fields = ("public_id",)
 
-# ---------- Business ----------
-class BusinessSerializer(serializers.ModelSerializer):
-    status = serializers.PrimaryKeyRelatedField(
-        queryset=EntityStatus.objects.all(),
-        required=False,
-        allow_null=True
-    )
+class BusinessSerializer(
+    DefaultActiveStatusMixin,
+    serializers.ModelSerializer,
+):
+    status = public_id_field(EntityStatus, required=False)
+
     class Meta:
         model = Business
-        fields = ("public_id", "business_name", "description", "currency", "status", "created_at", "updated_at")
-        read_only_fields = ("public_id", "created_at", "updated_at")
-        extra_kwargs = {
-            "status": {"required": False}
-        }
+        fields = (
+            "public_id",
+            "business_name",
+            "description",
+            "currency",
+            "status",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "public_id",
+            "created_at",
+            "updated_at",
+        )
 
-    def create(self, validated_data):
-        if not validated_data.get("status"):
-            active = EntityStatus.objects.filter(name__iexact="Activo").first()
-
-            if not active:
-                raise serializers.ValidationError({"status": 'No existe el estado "Activo".'})
-            validated_data["status"] = active
-
-        return super().create(validated_data)
-
-class BusinessMembershipSerializer(
-    serializers.ModelSerializer
-):
+class BusinessMembershipSerializer(serializers.ModelSerializer):
     user_email = serializers.EmailField(
         source="user.email",
         read_only=True,
     )
-
+    business = public_id_read_only()
     business_name = serializers.CharField(
         source="business.business_name",
         read_only=True,
     )
-
+    employee = public_id_read_only(allow_null=True)
     employee_name = serializers.CharField(
         source="employee.full_name",
         read_only=True,
         allow_null=True,
     )
-
     role_display = serializers.CharField(
         source="get_role_display",
         read_only=True,
@@ -219,8 +263,7 @@ class BusinessMembershipSerializer(
 
     class Meta:
         model = BusinessMembership
-
-        fields = [
+        fields = (
             "public_id",
             "user_email",
             "business",
@@ -232,19 +275,8 @@ class BusinessMembershipSerializer(
             "is_active",
             "created_at",
             "updated_at",
-        ]
-
-        read_only_fields = [
-            "public_id",
-            "user_email",
-            "business",
-            "business_name",
-            "employee",
-            "employee_name",
-            "role_display",
-            "created_at",
-            "updated_at",
-        ]
+        )
+        read_only_fields = fields
 
 class BusinessMembershipUpdateSerializer(
     serializers.ModelSerializer
@@ -379,13 +411,20 @@ class BusinessMembershipUpdateSerializer(
         return attrs
 
 # ---------- Productos ----------
-class ProductCategorySerializer(serializers.ModelSerializer):
+class ProductCategorySerializer(
+    DefaultActiveStatusMixin,
+    serializers.ModelSerializer,
+):
+    business = public_id_field(Business)
+    status = public_id_field(EntityStatus, required=False)
+
     class Meta:
         model = ProductCategory
         fields = (
             "public_id",
             "business",
             "name",
+            "status",
             "created_at",
             "updated_at",
         )
@@ -395,20 +434,40 @@ class ProductCategorySerializer(serializers.ModelSerializer):
             "updated_at",
         )
 
-class ProductSerializer(serializers.ModelSerializer):
-    status = serializers.PrimaryKeyRelatedField(
-        queryset=EntityStatus.objects.all(),
+class ProductSerializer(
+    DefaultActiveStatusMixin,
+    serializers.ModelSerializer,
+):
+    business = public_id_field(Business)
+    category = public_id_field(
+        ProductCategory,
         required=False,
-        allow_null=True
+        allow_null=True,
     )
+    status = public_id_field(EntityStatus, required=False)
+
     class Meta:
         model = Product
         fields = (
-            "public_id", "business", "category", "title", "description", "image_url",
-            "base_price", "base_cost", "stock", "is_visible", "status",
-            "created_at", "updated_at"
+            "public_id",
+            "business",
+            "category",
+            "title",
+            "description",
+            "image_url",
+            "base_price",
+            "base_cost",
+            "stock",
+            "is_visible",
+            "status",
+            "created_at",
+            "updated_at",
         )
-        read_only_fields = ("public_id", "created_at", "updated_at")
+        read_only_fields = (
+            "public_id",
+            "created_at",
+            "updated_at",
+        )
 
     def validate(self, attrs):
         business = attrs.get(
@@ -433,20 +492,12 @@ class ProductSerializer(serializers.ModelSerializer):
 
         return attrs
 
-    def create(self, validated_data):
-        if not validated_data.get("status"):
-            active = EntityStatus.objects.filter(name__iexact="Activo").first()
-            if not active:
-                raise serializers.ValidationError({"status": 'No existe el estado "Activo".'})
-            validated_data["status"] = active
-        return super().create(validated_data)
-
-class ProductVariantTypeSerializer(serializers.ModelSerializer):
-    status = serializers.PrimaryKeyRelatedField(
-        queryset=EntityStatus.objects.all(),
-        required=False,
-        allow_null=True,
-    )
+class ProductVariantTypeSerializer(
+    DefaultActiveStatusMixin,
+    serializers.ModelSerializer,
+):
+    product = public_id_field(Product)
+    status = public_id_field(EntityStatus, required=False)
 
     class Meta:
         model = ProductVariantType
@@ -464,91 +515,98 @@ class ProductVariantTypeSerializer(serializers.ModelSerializer):
             "updated_at",
         )
 
-class ProductVariantSerializer(serializers.ModelSerializer):
-    status = serializers.PrimaryKeyRelatedField(
-        queryset=EntityStatus.objects.all(),
-        required=False,
-        allow_null=True
-    )
+class ProductVariantSerializer(
+    DefaultActiveStatusMixin,
+    serializers.ModelSerializer,
+):
+    variant_type = public_id_field(ProductVariantType)
+    status = public_id_field(EntityStatus, required=False)
+
     class Meta:
         model = ProductVariant
-        fields = ("public_id", "variant_type", "label", "additional_price", "stock", "status")
+        fields = (
+            "public_id",
+            "variant_type",
+            "label",
+            "additional_price",
+            "stock",
+            "status",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "public_id",
+            "created_at",
+            "updated_at",
+        )
 
-    def create(self, validated_data):
-        if not validated_data.get("status"):
-            active = EntityStatus.objects.filter(name__iexact="Activo").first()
-            if not active:
-                raise serializers.ValidationError({"status": 'No existe el estado "Activo".'})
-            validated_data["status"] = active
-        return super().create(validated_data)
+class EmployeeSerializer(
+    DefaultActiveStatusMixin,
+    serializers.ModelSerializer,
+):
+    business = public_id_field(Business)
+    status = public_id_field(EntityStatus, required=False)
 
-# ---------- Personas/Entidades ----------
-class EmployeeSerializer(serializers.ModelSerializer):
-    status = serializers.PrimaryKeyRelatedField(
-        queryset=EntityStatus.objects.all(),
-        required=False,
-        allow_null=True
-    )
     class Meta:
         model = Employee
         fields = ("public_id", "business", "full_name", "phone", "position", "status", "created_at", "updated_at")
+        read_only_fields = (
+            "public_id",
+            "created_at",
+            "updated_at",
+        )
 
-    def create(self, validated_data):
-        if not validated_data.get("status"):
-            active = EntityStatus.objects.filter(name__iexact="Activo").first()
-            if not active:
-                raise serializers.ValidationError({"status": 'No existe el estado "Activo".'})
-            validated_data["status"] = active
-        return super().create(validated_data)
+class CustomerSerializer(
+    DefaultActiveStatusMixin,
+    serializers.ModelSerializer,
+):
+    business = public_id_field(Business)
+    status = public_id_field(EntityStatus, required=False)
 
-class CustomerSerializer(serializers.ModelSerializer):
-    status = serializers.PrimaryKeyRelatedField(
-        queryset=EntityStatus.objects.all(),
-        required=False,
-        allow_null=True
-    )
     class Meta:
         model = Customer
         fields = ("public_id", "business", "full_name", "phone", "email", "status", "created_at", "updated_at")
+        read_only_fields = (
+            "public_id",
+            "created_at",
+            "updated_at",
+        )
 
-    def create(self, validated_data):
-        if not validated_data.get("status"):
-            active = EntityStatus.objects.filter(name__iexact="Activo").first()
-            if not active:
-                raise serializers.ValidationError({"status": 'No existe el estado "Activo".'})
-            validated_data["status"] = active
-        return super().create(validated_data)
+class SupplierSerializer(
+    DefaultActiveStatusMixin,
+    serializers.ModelSerializer,
+):
+    business = public_id_field(Business)
+    status = public_id_field(EntityStatus, required=False)
 
-class SupplierSerializer(serializers.ModelSerializer):
-    status = serializers.PrimaryKeyRelatedField(
-        queryset=EntityStatus.objects.all(),
-        required=False,
-        allow_null=True
-    )
     class Meta:
         model = Supplier
         fields = ("public_id", "business", "name", "phone", "email", "status", "created_at", "updated_at")
-    
-    def create(self, validated_data):
-        if not validated_data.get("status"):
-            active = EntityStatus.objects.filter(name__iexact="Activo").first()
-            if not active:
-                raise serializers.ValidationError({"status": 'No existe el estado "Activo".'})
-            validated_data["status"] = active
-        return super().create(validated_data)
+        read_only_fields = (
+            "public_id",
+            "created_at",
+            "updated_at",
+        )
 
-# ---------- Transacciones ----------
-class TransactionDetailSerializer(
-    serializers.ModelSerializer
-):
+class TransactionDetailSerializer(serializers.ModelSerializer):
+    product = public_id_field(Product)
+    variant = public_id_field(
+        ProductVariant,
+        required=False,
+        allow_null=True,
+    )
+    quantity = serializers.IntegerField(
+        min_value=1,
+        max_value=100_000,
+    )
     product_title = serializers.CharField(
         source="product.title",
         read_only=True,
     )
-
     variant_label = serializers.CharField(
         source="variant.label",
         read_only=True,
+        allow_null=True,
     )
 
     class Meta:
@@ -571,8 +629,25 @@ class TransactionDetailSerializer(
 class TransactionSerializer(
     serializers.ModelSerializer
 ):
-    status = serializers.PrimaryKeyRelatedField(
-        queryset=EntityStatus.objects.all(),
+    business = public_id_field(Business)
+    customer = public_id_field(
+        Customer,
+        required=False,
+        allow_null=True,
+    )
+    supplier = public_id_field(
+        Supplier,
+        required=False,
+        allow_null=True,
+    )
+    employee = public_id_read_only(allow_null=True)
+    payment_method = public_id_field(
+        PaymentMethod,
+        required=False,
+        allow_null=True,
+    )
+    status = public_id_field(
+        EntityStatus,
         required=False,
     )
 
@@ -936,14 +1011,12 @@ class TransactionSerializer(
             product = detail.get("product")
             variant = detail.get("variant")
             quantity = detail.get("quantity")
-            unit_price = detail.get(
-                "unit_price"
-            )
+            unit_price = detail.get("unit_price")
 
             if product is None:
                 raise serializers.ValidationError(
-                    f"Detalle #{index}: debe "
-                    "incluir producto."
+                    f"Detalle #{index}: debe incluir "
+                    "un producto."
                 )
 
             if (
@@ -951,33 +1024,58 @@ class TransactionSerializer(
                 or quantity <= 0
             ):
                 raise serializers.ValidationError(
-                    f"Detalle #{index}: quantity "
-                    "debe ser mayor que 0."
+                    f"Detalle #{index}: quantity debe "
+                    "ser mayor que 0."
                 )
 
             if (
                 unit_price is not None
-                and unit_price
-                < Decimal("0.00")
+                and unit_price < Decimal("0.00")
             ):
                 raise serializers.ValidationError(
-                    f"Detalle #{index}: unit_price "
-                    "no puede ser negativo."
+                    f"Detalle #{index}: unit_price no "
+                    "puede ser negativo."
                 )
 
             if (
                 variant is not None
-                and
-                variant.variant_type.product_id
+                and variant.variant_type.product_id
                 != product.id
             ):
                 raise serializers.ValidationError(
-                    f"Detalle #{index}: la variante "
-                    "no pertenece al producto."
+                    f"Detalle #{index}: la variante no "
+                    "pertenece al producto indicado."
+                )
+
+            has_variants = (
+                product.variant_types
+                .filter(
+                    variants__isnull=False,
+                )
+                .exists()
+            )
+
+            if (
+                has_variants
+                and variant is None
+            ):
+                raise serializers.ValidationError(
+                    f"Detalle #{index}: el producto "
+                    "utiliza variantes. Debes seleccionar "
+                    "una variante."
+                )
+
+            if (
+                not has_variants
+                and variant is not None
+            ):
+                raise serializers.ValidationError(
+                    f"Detalle #{index}: este producto "
+                    "no administra stock mediante variantes."
                 )
 
         return value
-
+    
     def update(
         self,
         instance,
@@ -1130,32 +1228,30 @@ class TransactionSerializer(
             start=1,
         ):
             product = detail_data["product"]
-            variant = detail_data.get(
-                "variant"
-            )
+            variant = detail_data.get("variant")
             quantity = detail_data["quantity"]
-            unit_price = detail_data.get(
-                "unit_price"
-            )
+            unit_price = detail_data.get("unit_price")
 
             if unit_price is None:
-                additional_price = (
-                    variant.additional_price
-                    if variant is not None
-                    else Decimal("0.00")
-                )
+                if transaction.type == "purchase":
+                    unit_price = product.base_cost
+                else:
+                    additional_price = (
+                        variant.additional_price
+                        if variant is not None
+                        else Decimal("0.00")
+                    )
 
-                unit_price = (
-                    product.base_price
-                    + additional_price
-                )
+                    unit_price = (
+                        product.base_price
+                        + additional_price
+                    )    
 
             if unit_price < Decimal("0.00"):
                 raise serializers.ValidationError({
                     "details": (
                         f"Detalle #{index}: el precio "
-                        "calculado no puede ser "
-                        "negativo."
+                        "no puede ser negativo."
                     )
                 })
 
@@ -1213,13 +1309,37 @@ class TransactionSerializer(
 
 # ---------- Pagos de Deuda ----------
 class DebtSerializer(serializers.ModelSerializer):
+    transaction = public_id_field(Transaction)
+
     class Meta:
         model = Debt
-        fields = ("public_id", "transaction", "total_amount", "paid_amount", "interest_rate",
-                  "term_months", "due_date", "is_settled", "created_at", "updated_at")
-        read_only_fields = ("public_id", "created_at", "updated_at", "is_settled")
+        fields = (
+            "public_id",
+            "transaction",
+            "total_amount",
+            "paid_amount",
+            "interest_rate",
+            "term_months",
+            "due_date",
+            "is_settled",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "public_id",
+            "created_at",
+            "updated_at",
+            "is_settled",
+        )
 
 class DebtPaymentSerializer(serializers.ModelSerializer):
+    debt = public_id_field(Debt)
+    payment_method = public_id_field(PaymentMethod)
+    transaction = public_id_field(
+        Transaction,
+        required=False,
+        allow_null=True,
+    )
     class Meta:
         model = DebtPayment
         fields = ("public_id", "debt", "amount", "payment_date", "payment_method", "transaction", "created_at", "updated_at")
@@ -1235,6 +1355,24 @@ class DebtPaymentSerializer(serializers.ModelSerializer):
             "amount",
             getattr(self.instance, "amount", None),
         )
+
+        payment_method = attrs.get(
+            "payment_method",
+            getattr(self.instance, "payment_method", None),
+        )
+
+        if (
+            debt is not None
+            and payment_method is not None
+            and payment_method.business_id
+            != debt.transaction.business_id
+        ):
+            raise serializers.ValidationError({
+                "payment_method": (
+                    "El método de pago no pertenece "
+                    "al negocio de la deuda."
+                )
+            })
 
         if debt and amount:
             previous_amount = (
@@ -1297,54 +1435,313 @@ class DebtPaymentSerializer(serializers.ModelSerializer):
 
 # ---------- Notificaciones / Recordatorios ----------
 class NotificationSerializer(serializers.ModelSerializer):
-    user_email = serializers.EmailField(source="user.email", read_only=True)
+    user_email = serializers.EmailField(
+        source="user.email",
+        read_only=True,
+    )
+    business = public_id_field(
+        Business,
+        required=False,
+        allow_null=True,
+    )
+    transaction = public_id_field(
+        Transaction,
+        required=False,
+        allow_null=True,
+    )
+
     class Meta:
         model = Notification
-        fields = ("public_id", "title", "message", "type", "user", "user_email",
-                  "business", "transaction", "is_read", "sent_at", "scheduled_at",
-                  "created_at", "updated_at")
+        fields = (
+            "public_id",
+            "title",
+            "message",
+            "type",
+            "user",
+            "user_email",
+            "business",
+            "transaction",
+            "is_read",
+            "sent_at",
+            "scheduled_at",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "public_id",
+            "user",
+            "user_email",
+            "sent_at",
+            "created_at",
+            "updated_at",
+        )
+
+    def validate(self, attrs):
+        business = attrs.get(
+            "business",
+            getattr(self.instance, "business", None),
+        )
+        transaction = attrs.get(
+            "transaction",
+            getattr(self.instance, "transaction", None),
+        )
+
+        if (
+            business is not None
+            and transaction is not None
+            and transaction.business_id != business.id
+        ):
+            raise serializers.ValidationError({
+                "transaction": (
+                    "La transacción no pertenece al negocio seleccionado."
+                )
+            })
+
+        return attrs
 
 class ReminderSerializer(serializers.ModelSerializer):
+    business = public_id_field(
+        Business,
+        required=False,
+        allow_null=True,
+    )
+    transaction = public_id_field(
+        Transaction,
+        required=False,
+        allow_null=True,
+    )
+
     class Meta:
         model = Reminder
-        fields = ("public_id", "title", "description", "due_date", "is_completed",
-                  "user", "business", "transaction", "created_at", "updated_at")
+        fields = (
+            "public_id",
+            "title",
+            "description",
+            "due_date",
+            "is_completed",
+            "user",
+            "business",
+            "transaction",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "public_id",
+            "user",
+            "created_at",
+            "updated_at",
+        )
 
-# ---------- Presupuesto / Metas ----------
+    def validate(self, attrs):
+        business = attrs.get(
+            "business",
+            getattr(self.instance, "business", None),
+        )
+        transaction = attrs.get(
+            "transaction",
+            getattr(self.instance, "transaction", None),
+        )
+
+        if (
+            business is not None
+            and transaction is not None
+            and transaction.business_id != business.id
+        ):
+            raise serializers.ValidationError({
+                "transaction": (
+                    "La transacción no pertenece al negocio seleccionado."
+                )
+            })
+
+        return attrs
+
 class BudgetSerializer(serializers.ModelSerializer):
+    business = public_id_field(Business)
+    status = public_id_field(EntityStatus, required=False)
+
     class Meta:
         model = Budget
-        fields = ("public_id", "user", "business", "status", "period_start", "period_end",
-                  "allocated_amount", "used_amount", "created_at", "updated_at")
+        fields = (
+            "public_id",
+            "user",
+            "business",
+            "status",
+            "period_start",
+            "period_end",
+            "allocated_amount",
+            "used_amount",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "public_id",
+            "user",
+            "created_at",
+            "updated_at",
+        )
+
+    def validate(self, attrs):
+        start = attrs.get(
+            "period_start",
+            getattr(self.instance, "period_start", None),
+        )
+        end = attrs.get(
+            "period_end",
+            getattr(self.instance, "period_end", None),
+        )
+
+        if start is not None and end is not None and end < start:
+            raise serializers.ValidationError({
+                "period_end": (
+                    "La fecha final no puede ser anterior a la inicial."
+                )
+            })
+
+        return attrs
+
+    def create(self, validated_data):
+        validated_data.setdefault("status", get_active_status())
+        return super().create(validated_data)
 
 class GoalSerializer(serializers.ModelSerializer):
+    business = public_id_field(Business)
+
     class Meta:
         model = Goal
-        fields = ("public_id", "user", "business", "name", "description", "target_amount",
-                  "current_amount", "start_date", "end_date", "is_completed",
-                  "created_at", "updated_at")
+        fields = (
+            "public_id",
+            "user",
+            "business",
+            "name",
+            "description",
+            "target_amount",
+            "current_amount",
+            "start_date",
+            "end_date",
+            "is_completed",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "public_id",
+            "user",
+            "current_amount",
+            "is_completed",
+            "created_at",
+            "updated_at",
+        )
+
+    def validate(self, attrs):
+        start = attrs.get(
+            "start_date",
+            getattr(self.instance, "start_date", None),
+        )
+        end = attrs.get(
+            "end_date",
+            getattr(self.instance, "end_date", None),
+        )
+
+        if start is not None and end is not None and end < start:
+            raise serializers.ValidationError({
+                "end_date": (
+                    "La fecha final no puede ser anterior a la inicial."
+                )
+            })
+
+        return attrs
 
 class GoalProgressSerializer(serializers.ModelSerializer):
+    goal = public_id_field(Goal)
+    transaction = public_id_field(
+        Transaction,
+        required=False,
+        allow_null=True,
+    )
+    status = public_id_field(
+        EntityStatus,
+        required=False,
+    )
     class Meta:
         model = GoalProgress
         fields = ("public_id", "goal", "amount", "transaction", "status", "note",
                   "created_at", "updated_at")
 
+    def validate(self, attrs):
+        goal = attrs.get(
+            "goal",
+            getattr(self.instance, "goal", None),
+        )
+        transaction = attrs.get(
+            "transaction",
+            getattr(self.instance, "transaction", None),
+        )
+
+        if (
+            goal is not None
+            and transaction is not None
+            and transaction.business_id != goal.business_id
+        ):
+            raise serializers.ValidationError({
+                "transaction": (
+                    "La transacción no pertenece al negocio de la meta."
+                )
+            })
+
+        return attrs
+
     @db_tx.atomic
     def create(self, validated_data):
-        gp = super().create(validated_data)
-        goal = gp.goal
-        goal.current_amount = (goal.current_amount or 0) + gp.amount
-        if goal.current_amount >= goal.target_amount:
-            goal.is_completed = True
-        goal.save(update_fields=["current_amount", "is_completed"])
-        return gp
+        validated_data.setdefault("status", get_active_status())
+        progress = super().create(validated_data)
+
+        goal = (
+            Goal.objects
+            .select_for_update()
+            .get(pk=progress.goal_id)
+        )
+
+        goal.current_amount = (
+            goal.current_amount or Decimal("0.00")
+        ) + progress.amount
+        goal.is_completed = (
+            goal.current_amount >= goal.target_amount
+        )
+        goal.save(
+            update_fields=[
+                "current_amount",
+                "is_completed",
+            ]
+        )
+        return progress
 
 # ---------- Lecturas (solo por si las quieres exponer) ----------
 class StockMovementSerializer(serializers.ModelSerializer):
+    product = public_id_read_only()
+    variant = public_id_read_only(allow_null=True)
+    transaction = public_id_read_only(allow_null=True)
+    transaction_detail = public_id_read_only(allow_null=True)
+    created_by_email = serializers.EmailField(
+        source="created_by.email",
+        read_only=True,
+        allow_null=True,
+    )
+
     class Meta:
         model = StockMovement
-        fields = ("public_id", "product", "variant", "transaction", "note", "type", "quantity", "created_at", "updated_at")
+        fields = (
+            "public_id",
+            "product",
+            "variant",
+            "transaction",
+            "transaction_detail",
+            "note",
+            "type",
+            "quantity",
+            "created_by_email",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
 
 class SalesSummarySerializer(serializers.ModelSerializer):
     class Meta:

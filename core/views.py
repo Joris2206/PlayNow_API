@@ -35,6 +35,19 @@ FRONTEND_RESET_URL = settings.FRONTEND_RESET_URL
 # al ejecutar las solicitudes desde Swagger.
 # ---------------------------------------------------------------------------
 
+BUSINESS_PUBLIC_ID = "a0507c11-2617-41cd-90eb-da63917a5cdd"
+CATEGORY_PUBLIC_ID = "4276b1bb-82fc-4806-9a5c-de70002e8e41"
+PRODUCT_PUBLIC_ID = "7aa19d16-1915-4cfa-8658-3b967e198c70"
+VARIANT_TYPE_PUBLIC_ID = "664de038-94c0-451c-969f-1ac5c93c6220"
+VARIANT_PUBLIC_ID = "c5067b51-b848-4c5e-98dc-b2cfcf6d63db"
+CUSTOMER_PUBLIC_ID = "eb659af9-b488-4562-85cb-c4b4130aa607"
+SUPPLIER_PUBLIC_ID = "e4069f25-0208-4094-9609-d7e40db38b27"
+PAYMENT_METHOD_PUBLIC_ID = "9f98c592-fc72-4649-8c39-a1540c895737"
+TRANSACTION_PUBLIC_ID = "bcd85f11-e36d-4cac-94ca-b005f48843cf"
+DEBT_PUBLIC_ID = "4da69052-bb85-483b-aef8-ad3d14579a49"
+GOAL_PUBLIC_ID = "85af7d8e-8dc8-4616-8609-ce92df799ad6"
+STATUS_PUBLIC_ID = "61823ecf-a0ec-45e3-b909-4ee8780a8246"
+
 REGISTER_EXAMPLE = OpenApiExample(
     "Registro de propietario",
     value={
@@ -80,7 +93,7 @@ MEMBERSHIP_UPDATE_EXAMPLE = OpenApiExample(
 CATEGORY_CREATE_EXAMPLE = OpenApiExample(
     "Crear categoría",
     value={
-        "business": 1,
+        "business": BUSINESS_PUBLIC_ID,
         "name": "Calzado",
     },
     request_only=True,
@@ -89,8 +102,8 @@ CATEGORY_CREATE_EXAMPLE = OpenApiExample(
 PRODUCT_CREATE_EXAMPLE = OpenApiExample(
     "Crear producto",
     value={
-        "business": 1,
-        "category": 2,
+        "business": BUSINESS_PUBLIC_ID,
+        "category": CATEGORY_PUBLIC_ID,
         "title": "Zapato deportivo unisex",
         "description": "Zapato cómodo para uso diario.",
         "image_url": "https://example.com/images/zapato-deportivo.jpg",
@@ -105,7 +118,7 @@ PRODUCT_CREATE_EXAMPLE = OpenApiExample(
 VARIANT_TYPE_CREATE_EXAMPLE = OpenApiExample(
     "Crear tipo de variante",
     value={
-        "product": 5,
+        "product": PRODUCT_PUBLIC_ID,
         "name": "Talla",
     },
     request_only=True,
@@ -114,7 +127,7 @@ VARIANT_TYPE_CREATE_EXAMPLE = OpenApiExample(
 VARIANT_CREATE_EXAMPLE = OpenApiExample(
     "Crear variante",
     value={
-        "variant_type": 3,
+        "variant_type": VARIANT_TYPE_PUBLIC_ID,
         "label": "Talla 38",
         "additional_price": "0.00",
         "stock": 8,
@@ -125,7 +138,7 @@ VARIANT_CREATE_EXAMPLE = OpenApiExample(
 EMPLOYEE_CREATE_EXAMPLE = OpenApiExample(
     "Registrar empleado sin acceso al sistema",
     value={
-        "business": 1,
+        "business": BUSINESS_PUBLIC_ID,
         "full_name": "Ana Martínez",
         "phone": "7777-4321",
         "position": "Dependiente",
@@ -136,7 +149,7 @@ EMPLOYEE_CREATE_EXAMPLE = OpenApiExample(
 CUSTOMER_CREATE_EXAMPLE = OpenApiExample(
     "Registrar cliente",
     value={
-        "business": 1,
+        "business": BUSINESS_PUBLIC_ID,
         "full_name": "José Ramírez",
         "phone": "8666-1122",
         "email": "jose.ramirez@example.com",
@@ -147,7 +160,7 @@ CUSTOMER_CREATE_EXAMPLE = OpenApiExample(
 SUPPLIER_CREATE_EXAMPLE = OpenApiExample(
     "Registrar proveedor",
     value={
-        "business": 1,
+        "business": BUSINESS_PUBLIC_ID,
         "name": "Distribuidora Central",
         "phone": "2255-7788",
         "email": "ventas@distribuidoracentral.example.com",
@@ -158,7 +171,7 @@ SUPPLIER_CREATE_EXAMPLE = OpenApiExample(
 PAYMENT_METHOD_CREATE_EXAMPLE = OpenApiExample(
     "Crear método de pago",
     value={
-        "business": 1,
+        "business": BUSINESS_PUBLIC_ID,
         "name": "Transferencia bancaria",
     },
     request_only=True,
@@ -167,10 +180,10 @@ PAYMENT_METHOD_CREATE_EXAMPLE = OpenApiExample(
 TRANSACTION_SALE_EXAMPLE = OpenApiExample(
     "Venta pagada",
     value={
-        "business": 1,
-        "customer": 4,
+        "business": BUSINESS_PUBLIC_ID,
+        "customer": CUSTOMER_PUBLIC_ID,
         "supplier": None,
-        "payment_method": 2,
+        "payment_method": PAYMENT_METHOD_PUBLIC_ID,
         "type": "sale",
         "discount_percent": "5.00",
         "concept": "Venta en mostrador",
@@ -180,8 +193,8 @@ TRANSACTION_SALE_EXAMPLE = OpenApiExample(
         "invoice_file_url": "",
         "details": [
             {
-                "product": 5,
-                "variant": 8,
+                "product": PRODUCT_PUBLIC_ID,
+                "variant": VARIANT_PUBLIC_ID,
                 "quantity": 2,
                 "unit_price": "850.00",
             }
@@ -193,10 +206,10 @@ TRANSACTION_SALE_EXAMPLE = OpenApiExample(
 TRANSACTION_PURCHASE_EXAMPLE = OpenApiExample(
     "Compra de inventario",
     value={
-        "business": 1,
+        "business": BUSINESS_PUBLIC_ID,
         "customer": None,
-        "supplier": 3,
-        "payment_method": 1,
+        "supplier": SUPPLIER_PUBLIC_ID,
+        "payment_method": PAYMENT_METHOD_PUBLIC_ID,
         "type": "purchase",
         "discount_percent": "0.00",
         "concept": "Reposición semanal de inventario",
@@ -206,8 +219,8 @@ TRANSACTION_PURCHASE_EXAMPLE = OpenApiExample(
         "invoice_file_url": "",
         "details": [
             {
-                "product": 5,
-                "variant": 8,
+                "product": PRODUCT_PUBLIC_ID,
+                "variant": VARIANT_PUBLIC_ID,
                 "quantity": 12,
                 "unit_price": "560.00",
             }
@@ -219,10 +232,10 @@ TRANSACTION_PURCHASE_EXAMPLE = OpenApiExample(
 TRANSACTION_EXPENSE_EXAMPLE = OpenApiExample(
     "Gasto general",
     value={
-        "business": 1,
+        "business": BUSINESS_PUBLIC_ID,
         "customer": None,
         "supplier": None,
-        "payment_method": 1,
+        "payment_method": PAYMENT_METHOD_PUBLIC_ID,
         "type": "expense",
         "discount_percent": "0.00",
         "concept": "Pago mensual de energía eléctrica",
@@ -239,8 +252,8 @@ TRANSACTION_EXPENSE_EXAMPLE = OpenApiExample(
 TRANSACTION_UPDATE_EXAMPLE = OpenApiExample(
     "Actualizar datos permitidos",
     value={
-        "customer": 4,
-        "payment_method": 2,
+        "customer": CUSTOMER_PUBLIC_ID,
+        "payment_method": PAYMENT_METHOD_PUBLIC_ID,
         "discount_percent": "5.00",
         "concept": "Venta corregida por solicitud del cliente",
         "invoice_number": "000145",
@@ -253,7 +266,7 @@ TRANSACTION_UPDATE_EXAMPLE = OpenApiExample(
 DEBT_CREATE_EXAMPLE = OpenApiExample(
     "Registrar deuda",
     value={
-        "transaction": 12,
+        "transaction": TRANSACTION_PUBLIC_ID,
         "total_amount": "1700.00",
         "paid_amount": "0.00",
         "interest_rate": "0.00",
@@ -266,10 +279,10 @@ DEBT_CREATE_EXAMPLE = OpenApiExample(
 DEBT_PAYMENT_CREATE_EXAMPLE = OpenApiExample(
     "Abono a deuda",
     value={
-        "debt": 6,
+        "debt": DEBT_PUBLIC_ID,
         "amount": "500.00",
         "payment_date": "2026-07-30",
-        "payment_method": 2,
+        "payment_method": PAYMENT_METHOD_PUBLIC_ID,
         "transaction": None,
     },
     request_only=True,
@@ -281,7 +294,7 @@ NOTIFICATION_CREATE_EXAMPLE = OpenApiExample(
         "title": "Stock bajo",
         "message": "El zapato deportivo talla 38 tiene solo 3 unidades.",
         "type": "warning",
-        "business": 1,
+        "business": BUSINESS_PUBLIC_ID,
         "transaction": None,
         "is_read": False,
         "scheduled_at": None,
@@ -296,7 +309,7 @@ REMINDER_CREATE_EXAMPLE = OpenApiExample(
         "description": "Confirmar la entrega del nuevo inventario.",
         "due_date": "2026-08-02",
         "is_completed": False,
-        "business": 1,
+        "business": BUSINESS_PUBLIC_ID,
         "transaction": None,
     },
     request_only=True,
@@ -305,8 +318,8 @@ REMINDER_CREATE_EXAMPLE = OpenApiExample(
 BUDGET_CREATE_EXAMPLE = OpenApiExample(
     "Crear presupuesto mensual",
     value={
-        "business": 1,
-        "status": 1,
+        "business": BUSINESS_PUBLIC_ID,
+        "status": STATUS_PUBLIC_ID,
         "period_start": "2026-08-01",
         "period_end": "2026-08-31",
         "allocated_amount": "50000.00",
@@ -318,7 +331,7 @@ BUDGET_CREATE_EXAMPLE = OpenApiExample(
 GOAL_CREATE_EXAMPLE = OpenApiExample(
     "Crear meta de ventas",
     value={
-        "business": 1,
+        "business": BUSINESS_PUBLIC_ID,
         "name": "Meta de ventas de agosto",
         "description": "Alcanzar cincuenta mil córdobas en ventas.",
         "target_amount": "50000.00",
@@ -333,10 +346,10 @@ GOAL_CREATE_EXAMPLE = OpenApiExample(
 GOAL_PROGRESS_CREATE_EXAMPLE = OpenApiExample(
     "Registrar avance de meta",
     value={
-        "goal": 2,
+        "goal": GOAL_PUBLIC_ID,
         "amount": "3500.00",
-        "transaction": 12,
-        "status": 1,
+        "transaction": TRANSACTION_PUBLIC_ID,
+        "status": STATUS_PUBLIC_ID,
         "note": "Venta mayorista registrada.",
     },
     request_only=True,
@@ -2262,6 +2275,7 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
                         product=product,
                         variant=variant,
                         transaction=tx,
+                        transaction_detail=detail,
                         created_by=self.request.user,
                         type=(
                             "sale"
@@ -2288,13 +2302,7 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     
     @db_tx.atomic
     def perform_update(self, serializer):
-        business = (
-            serializer.validated_data.get(
-                "business",
-                serializer.instance.business,
-            )
-        )
-
+        business = serializer.instance.business
         transaction_type = serializer.instance.type
 
         roles_by_transaction_type = {
@@ -2337,122 +2345,13 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         tx = serializer.save(
             updated_by=self.request.user,
         )
-        
-        sign = self._sign_for_tx(tx.type)  # sale:-1, purchase:+1, expense:None
 
-        # Si AHORA no debería afectar inventario (expense), neutraliza todo lo previo.
-        if sign is None:
-            current_totals = defaultdict(int)
-            for pid, vid, qty in tx.stock_movements.all().values_list("product_id", "variant_id", "quantity"):
-                current_totals[(pid, vid)] += qty
-
-            to_movs = []
-            for (pid, vid), cur_qty in current_totals.items():
-                if cur_qty:
-                    # revertir existencias con lock
-                    if vid:
-                        v = ProductVariant.objects.select_for_update().get(pk=vid)
-                        if v.stock - cur_qty < 0:
-                            raise ValidationError({"details": "Stock negativo no permitido"})
-                        v.stock -= cur_qty
-                        v.save(update_fields=["stock"])
-                    else:
-                        p = Product.objects.select_for_update().get(pk=pid)
-                        if p.stock - cur_qty < 0:
-                            raise ValidationError({"details": "Stock negativo no permitido"})
-                        p.stock -= cur_qty
-                        p.save(update_fields=["stock"])
-
-                    to_movs.append(StockMovement(
-                        product_id=pid,
-                        variant_id=vid,
-                        transaction=tx,
-                        created_by=self.request.user,
-                        type="adjustment",
-                        quantity=-cur_qty,
-                        note=f"Auto neutralize {tx.public_id}",
-                    ))
-
-            if to_movs:
-                StockMovement.objects.bulk_create(to_movs)
-
-            log_action(self.request.user, "UPDATE", tx.__class__.__name__, tx.pk)
-            return
-
-        # ------- sale / purchase: calcular deseado vs actual y ajustar -------
-        # Deseado = suma del efecto que DEBERÍA tener la transacción con sus detalles actuales
-        desired = defaultdict(int)
-        for d in tx.details.select_related("product", "variant"):
-            key = (d.product_id, d.variant_id)
-            desired[key] += sign * d.quantity
-
-        # Actual = suma del efecto que YA tuvo (todos los movimientos ligados a esta TX)
-        current = defaultdict(int)
-        for pid, vid, qty in tx.stock_movements.all().values_list("product_id", "variant_id", "quantity"):
-            current[(pid, vid)] += qty
-
-        to_movs = []
-
-        # 1) Ajustar diferencias (delta) para cada clave presente en "desired"
-        for (pid, vid), desired_qty in desired.items():
-            delta = desired_qty - current.get((pid, vid), 0)
-            if delta:
-                # actualizar stock acorde al delta con lock
-                if vid:
-                    v = ProductVariant.objects.select_for_update().get(pk=vid)
-                    # delta positivo => entra stock; delta negativo => sale stock
-                    if v.stock + delta < 0:
-                        raise ValidationError({"details": "Stock negativo no permitido"})
-                    v.stock += delta
-                    v.save(update_fields=["stock"])
-                else:
-                    p = Product.objects.select_for_update().get(pk=pid)
-                    if p.stock + delta < 0:
-                        raise ValidationError({"details": "Stock negativo no permitido"})
-                    p.stock += delta
-                    p.save(update_fields=["stock"])
-
-                to_movs.append(StockMovement(
-                    product_id=pid,
-                    variant_id=vid,
-                    transaction=tx,
-                    created_by=self.request.user,
-                    type="adjustment",
-                    quantity=delta,
-                    note=f"Auto adjust for {tx.public_id}",
-                ))
-
-        # 2) Si había movimientos que ya no deberían existir (claves que están en current pero no en desired), neutralízalos
-        for (pid, vid), cur_qty in list(current.items()):
-            if (pid, vid) not in desired and cur_qty:
-                # revertir su efecto en stock con lock
-                if vid:
-                    v = ProductVariant.objects.select_for_update().get(pk=vid)
-                    if v.stock - cur_qty < 0:
-                        raise ValidationError({"details": "Stock negativo no permitido"})
-                    v.stock -= cur_qty
-                    v.save(update_fields=["stock"])
-                else:
-                    p = Product.objects.select_for_update().get(pk=pid)
-                    if p.stock - cur_qty < 0:
-                        raise ValidationError({"details": "Stock negativo no permitido"})
-                    p.stock -= cur_qty
-                    p.save(update_fields=["stock"])
-
-                to_movs.append(StockMovement(
-                    product_id=pid,
-                    variant_id=vid,
-                    transaction=tx,
-                    created_by=self.request.user,
-                    type="adjustment",
-                    quantity=-cur_qty,
-                    note=f"Auto adjust remove for {tx.public_id}",
-                ))
-
-        if to_movs:
-            StockMovement.objects.bulk_create(to_movs)
-
-        log_action(self.request.user, "UPDATE", tx.__class__.__name__, tx.pk)
+        log_action(
+            self.request.user,
+            "UPDATE",
+            tx.__class__.__name__,
+            tx.pk,
+        )
 
     @db_tx.atomic
     def on_soft_delete(self, tx: Transaction):
