@@ -1,15 +1,19 @@
+from decimal import Decimal
 from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist
+from django.utils import timezone
 from rest_framework import viewsets, mixins, status
 from rest_framework.views import APIView
 from rest_framework.decorators import action, api_view, permission_classes, throttle_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, PermissionDenied
+from rest_framework.generics import GenericAPIView
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiExample, OpenApiResponse
-from .filters import StockMovementFilter
+from .filters import StockMovementFilter, TransactionFilter
 from .pagination import StandardResultsSetPagination
 from .mixins import SoftDeleteByStatusMixin
 from django.db import transaction as db_tx
+from django.db.models import (Avg, Count, Q, Sum)
 from collections import defaultdict
 from core.utils import log_action
 from rest_framework.throttling import ScopedRateThrottle
@@ -30,9 +34,9 @@ FRONTEND_RESET_URL = settings.FRONTEND_RESET_URL
 # ---------------------------------------------------------------------------
 # Ejemplos de Swagger
 #
-# Los identificadores numéricos representan las PK internas que actualmente
-# reciben los serializers relacionales. Sustitúyelos por registros existentes
-# al ejecutar las solicitudes desde Swagger.
+# Los identificadores relacionales utilizan public_id en formato UUID.
+# Los UUID definidos aquí son ejemplos y deben sustituirse por registros
+# existentes al ejecutar solicitudes desde Swagger.
 # ---------------------------------------------------------------------------
 
 BUSINESS_PUBLIC_ID = "a0507c11-2617-41cd-90eb-da63917a5cdd"
@@ -244,7 +248,6 @@ TRANSACTION_EXPENSE_EXAMPLE = OpenApiExample(
         "invoice_number": "EN-0726",
         "invoice_series": "SERV",
         "invoice_file_url": "",
-        "details": [],
     },
     request_only=True,
 )
@@ -335,10 +338,8 @@ GOAL_CREATE_EXAMPLE = OpenApiExample(
         "name": "Meta de ventas de agosto",
         "description": "Alcanzar cincuenta mil córdobas en ventas.",
         "target_amount": "50000.00",
-        "current_amount": "0.00",
         "start_date": "2026-08-01",
         "end_date": "2026-08-31",
-        "is_completed": False,
     },
     request_only=True,
 )
@@ -361,7 +362,7 @@ from .models import (
     Employee, Customer, Supplier, PaymentMethod,
     Transaction, TransactionDetail, StockMovement,
     Debt, DebtPayment, Notification, Reminder,
-    Budget, Goal, GoalProgress,
+    Budget, Goal, GoalProgress, EmployeeCommissionPlan, CommissionSettlement
 )
 from .serializers import (
     UserSerializer, RegisterSerializer,
@@ -370,12 +371,40 @@ from .serializers import (
     EmployeeSerializer, CustomerSerializer, SupplierSerializer, PaymentMethodSerializer,
     TransactionSerializer, TransactionDetailSerializer, StockMovementSerializer,
     DebtSerializer, DebtPaymentSerializer, NotificationSerializer, ReminderSerializer,
-    BudgetSerializer, GoalSerializer, GoalProgressSerializer,
+    BudgetSerializer, GoalSerializer, GoalProgressSerializer, CommissionSettlementCreateSerializer, CommissionSettlementSerializer, EmployeeCommissionPlanSerializer
 )
 from .permissions import IsOwnerOrBusinessOwner
 
-# -------- Healthcheck (ya lo usaste en /api/health/) --------
+def validate_report_business_access(
+    *,
+    user,
+    business,
+):
+    if user.is_superuser:
+        return
 
+    has_access = (
+        BusinessMembership.objects
+        .filter(
+            user=user,
+            business=business,
+            is_active=True,
+            role__in=[
+                BusinessMembership.ROLE_OWNER,
+                BusinessMembership.ROLE_ADMIN,
+            ],
+        )
+        .exists()
+    )
+
+    if not has_access:
+        raise PermissionDenied(
+            "Solo el propietario o un "
+            "administrador puede consultar "
+            "este reporte."
+        )
+
+# -------- Healthcheck (ya lo usaste en /api/health/) --------
 @extend_schema(
     responses=HealthSerializer,
     tags=["Health"],
@@ -2050,8 +2079,10 @@ class StockMovementViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         tags=["Transactions"],
         summary="Crear una transacción",
         description=(
-            "Crea una venta, compra o gasto. El usuario y el empleado "
-            "se vinculan automáticamente desde la sesión y la membresía."
+            "Crea una venta, compra o gasto. "
+            "El usuario autenticado se registra automáticamente "
+            "como creador de la transacción. En las ventas debe "
+            "indicarse el empleado al que pertenece la venta."
         ),
         examples=[
             TRANSACTION_SALE_EXAMPLE,
@@ -2096,7 +2127,6 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         .all()
     )
     serializer_class = TransactionSerializer
-    
     business_lookup = "business"
 
     read_allowed_roles = [
@@ -2113,12 +2143,9 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     pagination_class = StandardResultsSetPagination
 
     # Filtros/Búsqueda/Orden
-    filterset_fields = [
-        "type", "business", "business__public_id", "status",
-        "customer", "supplier", "employee", "payment_method",
-    ]
+    filterset_class = TransactionFilter
     search_fields = ["public_id", "invoice_number", "invoice_series", "concept",
-                     "customer__full_name", "supplier__name"]
+                     "customer__full_name", "supplier__name", "employee__full_name"]
     ordering_fields = ["created_at", "updated_at", "total_value", "invoice_number"]
     ordering = ["-created_at"]
 
@@ -2205,21 +2232,8 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
             allowed_roles=allowed_roles,
         )
 
-        membership = (
-            self._get_request_membership(
-                business
-            )
-        )
-
-        employee = (
-            membership.employee
-            if membership is not None
-            else None
-        )
-
         tx = serializer.save(
             created_by=self.request.user,
-            employee=employee,
         )
 
         sign = self._sign_for_tx(tx.type)
@@ -2337,11 +2351,6 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
             allowed_roles=allowed_roles,
         )
 
-        serializer.validated_data.pop(
-            "employee",
-            None,
-        )
-
         tx = serializer.save(
             updated_by=self.request.user,
         )
@@ -2424,21 +2433,22 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
             StockMovement.objects.bulk_create(to_movs)
     
 @extend_schema_view(
-    list=extend_schema(tags=["Debts"]),
-    retrieve=extend_schema(tags=["Debts"]),
-    create=extend_schema(
-        tags=["Debts"],
-        description="Registra una deuda asociada a una transacción del mismo negocio.",
-        examples=[DEBT_CREATE_EXAMPLE],
-    ),
-    update=extend_schema(tags=["Debts"]),
-    partial_update=extend_schema(tags=["Debts"]),
-    destroy=extend_schema(tags=["Debts"]),
+    list=extend_schema(tags=["Debts"], summary="Listar deudas"),
+    retrieve=extend_schema(tags=["Debts"], summary="Consultar una deuda"),
 )
-class DebtViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
-    queryset = Debt.objects.select_related("transaction", "transaction__business").all()
+class DebtViewSet(BusinessScopedViewSet):
+    queryset = (
+        Debt.objects
+        .select_related(
+            "transaction",
+            "transaction__business",
+            "transaction__customer",
+            "transaction__employee",
+        )
+        .order_by("-created_at")
+    )
+    
     serializer_class = DebtSerializer
-
     business_lookup = "transaction__business"
 
     read_allowed_roles = [
@@ -2449,38 +2459,41 @@ class DebtViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         BusinessMembership.ROLE_VIEWER,
     ]
 
-    create_allowed_roles = [
-        BusinessMembership.ROLE_OWNER,
-        BusinessMembership.ROLE_ADMIN,
-        BusinessMembership.ROLE_CASHIER,
-    ]
-
-    update_allowed_roles = create_allowed_roles
-
-    destroy_allowed_roles = [
-        BusinessMembership.ROLE_OWNER,
-        BusinessMembership.ROLE_ADMIN,
-    ]
-
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
 
+    http_method_names = [
+        "get",
+        "head",
+        "options",
+    ]
+
 
 @extend_schema_view(
-    list=extend_schema(tags=["Debt Payments"]),
-    retrieve=extend_schema(tags=["Debt Payments"]),
+    list=extend_schema(
+        tags=["Debt Payments"],
+        summary="Listar pagos de deudas",
+    ),
+    retrieve=extend_schema(
+        tags=["Debt Payments"],
+        summary="Consultar un pago de deuda",
+    ),
     create=extend_schema(
         tags=["Debt Payments"],
-        description="Registra un abono y actualiza automáticamente el saldo de la deuda.",
-        examples=[DEBT_PAYMENT_CREATE_EXAMPLE],
+        summary="Registrar un abono",
+        description=(
+            "Registra un abono y actualiza "
+            "automáticamente el monto pagado "
+            "y el estado de la deuda."
+        ),
+        examples=[
+            DEBT_PAYMENT_CREATE_EXAMPLE,
+        ],
     ),
-    update=extend_schema(tags=["Debt Payments"]),
-    partial_update=extend_schema(tags=["Debt Payments"]),
-    destroy=extend_schema(tags=["Debt Payments"]),
 )
-class DebtPaymentViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
-    queryset = DebtPayment.objects.select_related("debt", "debt__transaction").all()
+class DebtPaymentViewSet(BusinessScopedViewSet):
+    queryset = DebtPayment.objects.select_related("debt", "debt__transaction", "debt__transaction__business", "payment_method", "transaction").all()
     serializer_class = DebtPaymentSerializer
 
     business_lookup = "debt__transaction__business"
@@ -2497,20 +2510,21 @@ class DebtPaymentViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         BusinessMembership.ROLE_ADMIN,
         BusinessMembership.ROLE_CASHIER,
     ]
-    update_allowed_roles = create_allowed_roles
-    destroy_allowed_roles = [
-        BusinessMembership.ROLE_OWNER,
-        BusinessMembership.ROLE_ADMIN,
-    ]
 
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
 
+    http_method_names = [
+        "get",
+        "post",
+        "head",
+        "options",
+    ]
 
 @extend_schema_view(
-    list=extend_schema(tags=["Notifications"]),
-    retrieve=extend_schema(tags=["Notifications"]),
+    list=extend_schema(tags=["Notifications"], summary="Listar notificaciones"),
+    retrieve=extend_schema(tags=["Notifications"], summary="Consultar una notificación"),
     create=extend_schema(
         tags=["Notifications"],
         description="Crea una notificación personal asociada al negocio.",
@@ -2677,3 +2691,926 @@ class PasswordResetConfirmView(APIView):
         ser.is_valid(raise_exception=True)
         ser.save()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+@extend_schema_view(
+    list=extend_schema(
+        tags=["Commissions"],
+        summary="Listar planes de comisión",
+    ),
+    retrieve=extend_schema(
+        tags=["Commissions"],
+        summary="Consultar plan de comisión",
+    ),
+    create=extend_schema(
+        tags=["Commissions"],
+        summary="Crear plan de comisión",
+    ),
+    update=extend_schema(
+        tags=["Commissions"],
+        summary="Actualizar plan de comisión",
+    ),
+    partial_update=extend_schema(
+        tags=["Commissions"],
+        summary="Actualizar parcialmente un plan",
+    ),
+    destroy=extend_schema(
+        tags=["Commissions"],
+        summary="Eliminar plan de comisión",
+    ),
+)
+class EmployeeCommissionPlanViewSet(
+    viewsets.ModelViewSet
+):
+    queryset = (
+        EmployeeCommissionPlan.objects
+        .select_related(
+            "employee",
+            "employee__business",
+        )
+        .order_by(
+            "-valid_from",
+            "-created_at",
+        )
+    )
+
+    serializer_class = (
+        EmployeeCommissionPlanSerializer
+    )
+
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    lookup_field = "public_id"
+    lookup_url_kwarg = "public_id"
+
+    pagination_class = (
+        StandardResultsSetPagination
+    )
+
+    filterset_fields = [
+        "employee__public_id",
+        "employee__business__public_id",
+        "is_active",
+    ]
+
+    ordering_fields = [
+        "valid_from",
+        "valid_until",
+        "percentage",
+        "created_at",
+    ]
+
+    ordering = [
+        "-valid_from",
+    ]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+
+        if user.is_superuser:
+            return queryset
+
+        return (
+            queryset
+            .filter(
+                employee__business__memberships__user=user,
+                employee__business__memberships__is_active=True,
+            )
+            .distinct()
+        )
+
+    def _validate_management_access(
+        self,
+        employee,
+    ):
+        validate_report_business_access(
+            user=self.request.user,
+            business=employee.business,
+        )
+
+    @db_tx.atomic
+    def perform_create(
+        self,
+        serializer,
+    ):
+        employee = (
+            serializer.validated_data[
+                "employee"
+            ]
+        )
+
+        self._validate_management_access(
+            employee
+        )
+
+        plan = serializer.save()
+
+        log_action(
+            self.request.user,
+            "CREATE",
+            plan.__class__.__name__,
+            plan.pk,
+        )
+
+    @db_tx.atomic
+    def perform_update(
+        self,
+        serializer,
+    ):
+        employee = (
+            serializer.validated_data.get(
+                "employee",
+                serializer.instance.employee,
+            )
+        )
+
+        self._validate_management_access(
+            employee
+        )
+
+        plan = serializer.save()
+
+        log_action(
+            self.request.user,
+            "UPDATE",
+            plan.__class__.__name__,
+            plan.pk,
+        )
+
+    @db_tx.atomic
+    def perform_destroy(
+        self,
+        instance,
+    ):
+        self._validate_management_access(
+            instance.employee
+        )
+
+        instance.delete()
+
+        log_action(
+            self.request.user,
+            "DELETE",
+            instance.__class__.__name__,
+            instance.pk,
+        )
+
+class EmployeeSalesReportView(
+    GenericAPIView
+):
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    @extend_schema(
+        tags=["Reports"],
+        summary="Reporte de ventas por empleado",
+        description=(
+            "Calcula las ventas correspondientes "
+            "a un empleado dentro de un período."
+        ),
+        parameters=[
+            {
+                "name": "business_public_id",
+                "required": True,
+                "in": "query",
+                "schema": {
+                    "type": "string",
+                    "format": "uuid",
+                },
+            },
+            {
+                "name": "employee_public_id",
+                "required": True,
+                "in": "query",
+                "schema": {
+                    "type": "string",
+                    "format": "uuid",
+                },
+            },
+            {
+                "name": "date_from",
+                "required": True,
+                "in": "query",
+                "schema": {
+                    "type": "string",
+                    "format": "date",
+                },
+            },
+            {
+                "name": "date_to",
+                "required": True,
+                "in": "query",
+                "schema": {
+                    "type": "string",
+                    "format": "date",
+                },
+            },
+        ],
+    )
+    def get(
+        self,
+        request,
+    ):
+        business_public_id = (
+            request.query_params.get(
+                "business_public_id"
+            )
+        )
+
+        employee_public_id = (
+            request.query_params.get(
+                "employee_public_id"
+            )
+        )
+
+        date_from_value = (
+            request.query_params.get(
+                "date_from"
+            )
+        )
+
+        date_to_value = (
+            request.query_params.get(
+                "date_to"
+            )
+        )
+
+        errors = {}
+
+        if not business_public_id:
+            errors["business_public_id"] = (
+                "Este parámetro es requerido."
+            )
+
+        if not employee_public_id:
+            errors["employee_public_id"] = (
+                "Este parámetro es requerido."
+            )
+
+        if not date_from_value:
+            errors["date_from"] = (
+                "Este parámetro es requerido."
+            )
+
+        if not date_to_value:
+            errors["date_to"] = (
+                "Este parámetro es requerido."
+            )
+
+        if errors:
+            raise ValidationError(errors)
+
+        try:
+            date_from = (
+                timezone.datetime
+                .fromisoformat(
+                    date_from_value
+                )
+                .date()
+            )
+
+            date_to = (
+                timezone.datetime
+                .fromisoformat(
+                    date_to_value
+                )
+                .date()
+            )
+        except ValueError:
+            raise ValidationError({
+                "dates": (
+                    "Las fechas deben usar "
+                    "el formato YYYY-MM-DD."
+                )
+            })
+
+        if date_to < date_from:
+            raise ValidationError({
+                "date_to": (
+                    "La fecha final no puede ser "
+                    "anterior a la fecha inicial."
+                )
+            })
+
+        business = get_object_or_404(
+            Business,
+            public_id=business_public_id,
+        )
+
+        validate_report_business_access(
+            user=request.user,
+            business=business,
+        )
+
+        employee = get_object_or_404(
+            Employee.objects.select_related(
+                "business"
+            ),
+            public_id=employee_public_id,
+            business=business,
+        )
+
+        excluded_statuses = [
+            "Eliminado",
+            "Anulado",
+            "Cancelado",
+            "Void",
+            "Deleted",
+        ]
+
+        sales = (
+            Transaction.objects
+            .select_related(
+                "customer",
+                "employee",
+                "business",
+            )
+            .filter(
+                business=business,
+                employee=employee,
+                type="sale",
+                created_at__date__gte=date_from,
+                created_at__date__lte=date_to,
+            )
+            .exclude(
+                status__name__in=excluded_statuses
+            )
+            .order_by("-created_at")
+        )
+
+        summary = sales.aggregate(
+            sales_count=Count("id"),
+            sales_total=Sum("total_value"),
+            average_sale=Avg("total_value"),
+        )
+
+        sales_total = (
+            summary["sales_total"]
+            or Decimal("0.00")
+        )
+
+        average_sale = (
+            summary["average_sale"]
+            or Decimal("0.00")
+        )
+
+        transactions = [
+            {
+                "public_id": str(
+                    transaction.public_id
+                ),
+                "created_at": (
+                    transaction.created_at
+                ),
+                "customer_name": (
+                    transaction.customer.full_name
+                    if transaction.customer
+                    else None
+                ),
+                "invoice_series": (
+                    transaction.invoice_series
+                ),
+                "invoice_number": (
+                    transaction.invoice_number
+                ),
+                "total_value": str(
+                    transaction.total_value
+                ),
+            }
+            for transaction in sales
+        ]
+
+        return Response({
+            "business": {
+                "public_id": str(
+                    business.public_id
+                ),
+                "name": (
+                    business.business_name
+                ),
+                "currency": business.currency,
+            },
+            "employee": {
+                "public_id": str(
+                    employee.public_id
+                ),
+                "full_name": (
+                    employee.full_name
+                ),
+                "position": employee.position,
+            },
+            "period": {
+                "date_from": date_from,
+                "date_to": date_to,
+            },
+            "summary": {
+                "sales_count": (
+                    summary["sales_count"]
+                ),
+                "sales_total": str(
+                    sales_total.quantize(
+                        Decimal("0.01")
+                    )
+                ),
+                "average_sale": str(
+                    average_sale.quantize(
+                        Decimal("0.01")
+                    )
+                ),
+            },
+            "transactions": transactions,
+        })
+
+class EmployeeCommissionPreviewView(
+    GenericAPIView
+):
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    @extend_schema(
+        tags=["Commissions"],
+        summary="Calcular comisión de un empleado",
+    )
+    def get(
+        self,
+        request,
+    ):
+        business_public_id = (
+            request.query_params.get(
+                "business_public_id"
+            )
+        )
+
+        employee_public_id = (
+            request.query_params.get(
+                "employee_public_id"
+            )
+        )
+
+        date_from_value = (
+            request.query_params.get(
+                "date_from"
+            )
+        )
+
+        date_to_value = (
+            request.query_params.get(
+                "date_to"
+            )
+        )
+
+        if not all([
+            business_public_id,
+            employee_public_id,
+            date_from_value,
+            date_to_value,
+        ]):
+            raise ValidationError({
+                "detail": (
+                    "Debes indicar negocio, empleado, "
+                    "fecha inicial y fecha final."
+                )
+            })
+
+        try:
+            date_from = (
+                timezone.datetime
+                .fromisoformat(
+                    date_from_value
+                )
+                .date()
+            )
+
+            date_to = (
+                timezone.datetime
+                .fromisoformat(
+                    date_to_value
+                )
+                .date()
+            )
+        except ValueError:
+            raise ValidationError({
+                "dates": (
+                    "Las fechas deben usar "
+                    "el formato YYYY-MM-DD."
+                )
+            })
+
+        business = get_object_or_404(
+            Business,
+            public_id=business_public_id,
+        )
+
+        validate_report_business_access(
+            user=request.user,
+            business=business,
+        )
+
+        employee = get_object_or_404(
+            Employee,
+            public_id=employee_public_id,
+            business=business,
+        )
+
+        commission_plan = (
+            EmployeeCommissionPlan.objects
+            .filter(
+                employee=employee,
+                is_active=True,
+                valid_from__lte=date_to,
+            )
+            .filter(
+                Q(valid_until__isnull=True)
+                | Q(
+                    valid_until__gte=date_from
+                )
+            )
+            .order_by("-valid_from")
+            .first()
+        )
+
+        if commission_plan is None:
+            raise ValidationError({
+                "commission_plan": (
+                    "El empleado no tiene un plan "
+                    "de comisión vigente para "
+                    "ese período."
+                )
+            })
+
+        excluded_statuses = [
+            "Eliminado",
+            "Anulado",
+            "Cancelado",
+            "Void",
+            "Deleted",
+        ]
+
+        sales = (
+            Transaction.objects
+            .filter(
+                business=business,
+                employee=employee,
+                type="sale",
+                created_at__date__range=(
+                    date_from,
+                    date_to,
+                ),
+            )
+            .exclude(
+                status__name__in=excluded_statuses
+            )
+        )
+
+        summary = sales.aggregate(
+            sales_count=Count("id"),
+            sales_total=Sum("total_value"),
+        )
+
+        sales_total = (
+            summary["sales_total"]
+            or Decimal("0.00")
+        )
+
+        percentage = (
+            commission_plan.percentage
+        )
+
+        commission_total = (
+            sales_total
+            * percentage
+            / Decimal("100.00")
+        ).quantize(
+            Decimal("0.01")
+        )
+
+        return Response({
+            "business": {
+                "public_id": str(
+                    business.public_id
+                ),
+                "name": (
+                    business.business_name
+                ),
+                "currency": business.currency,
+            },
+            "employee": {
+                "public_id": str(
+                    employee.public_id
+                ),
+                "full_name": (
+                    employee.full_name
+                ),
+            },
+            "period": {
+                "date_from": date_from,
+                "date_to": date_to,
+            },
+            "sales_count": (
+                summary["sales_count"]
+            ),
+            "sales_total": str(
+                sales_total.quantize(
+                    Decimal("0.01")
+                )
+            ),
+            "commission_percentage": str(
+                percentage
+            ),
+            "commission_total": str(
+                commission_total
+            ),
+            "commission_plan": str(
+                commission_plan.public_id
+            ),
+        })
+
+@extend_schema_view(
+    list=extend_schema(
+        tags=["Commissions"],
+        summary=(
+            "Listar liquidaciones "
+            "de comisiones"
+        ),
+    ),
+    retrieve=extend_schema(
+        tags=["Commissions"],
+        summary=(
+            "Consultar liquidación "
+            "de comisión"
+        ),
+    ),
+    create=extend_schema(
+        tags=["Commissions"],
+        summary=(
+            "Crear liquidación "
+            "de comisión"
+        ),
+        description=(
+            "Calcula y congela la comisión "
+            "de un empleado para un período. "
+            "Los totales son calculados por "
+            "el backend."
+        ),
+        request=(
+            CommissionSettlementCreateSerializer
+        ),
+        responses={
+            201: CommissionSettlementSerializer,
+        },
+    ),
+)
+class CommissionSettlementViewSet(
+    viewsets.GenericViewSet,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+):
+    queryset = (
+        CommissionSettlement.objects
+        .select_related(
+            "employee",
+            "employee__business",
+            "created_by",
+        )
+        .order_by(
+            "-period_end",
+            "-created_at",
+        )
+    )
+
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    lookup_field = "public_id"
+    lookup_url_kwarg = "public_id"
+
+    pagination_class = (
+        StandardResultsSetPagination
+    )
+
+    filterset_fields = [
+        "employee__public_id",
+        "employee__business__public_id",
+        "status",
+        "period_start",
+        "period_end",
+    ]
+
+    ordering_fields = [
+        "period_start",
+        "period_end",
+        "sales_total",
+        "commission_total",
+        "created_at",
+        "paid_at",
+    ]
+
+    ordering = [
+        "-period_end",
+        "-created_at",
+    ]
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return (
+                CommissionSettlementCreateSerializer
+            )
+
+        return (
+            CommissionSettlementSerializer
+        )
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+
+        if user.is_superuser:
+            return queryset
+
+        return (
+            queryset
+            .filter(
+                employee__business__memberships__user=user,
+                employee__business__memberships__is_active=True,
+                employee__business__memberships__role__in=[
+                    BusinessMembership
+                    .ROLE_OWNER,
+                    BusinessMembership
+                    .ROLE_ADMIN,
+                ],
+            )
+            .distinct()
+        )
+
+    def _validate_management_access(
+        self,
+        business,
+    ):
+        user = self.request.user
+
+        if user.is_superuser:
+            return
+
+        has_access = (
+            BusinessMembership.objects
+            .filter(
+                user=user,
+                business=business,
+                is_active=True,
+                role__in=[
+                    BusinessMembership
+                    .ROLE_OWNER,
+                    BusinessMembership
+                    .ROLE_ADMIN,
+                ],
+            )
+            .exists()
+        )
+
+        if not has_access:
+            raise PermissionDenied(
+                "Solo el propietario o un "
+                "administrador puede gestionar "
+                "liquidaciones de comisiones."
+            )
+
+    @db_tx.atomic
+    def create(
+        self,
+        request,
+        *args,
+        **kwargs,
+    ):
+        serializer = (
+            self.get_serializer(
+                data=request.data,
+            )
+        )
+
+        serializer.is_valid(
+            raise_exception=True
+        )
+
+        employee = (
+            serializer.validated_data[
+                "employee"
+            ]
+        )
+
+        self._validate_management_access(
+            employee.business
+        )
+
+        settlement = serializer.save()
+
+        log_action(
+            request.user,
+            "CREATE",
+            settlement.__class__.__name__,
+            settlement.pk,
+        )
+
+        response_serializer = (
+            CommissionSettlementSerializer(
+                settlement,
+                context={
+                    "request": request,
+                },
+            )
+        )
+
+        return Response(
+            response_serializer.data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(
+        tags=["Commissions"],
+        summary=(
+            "Marcar liquidación como pagada"
+        ),
+        request=None,
+        responses={
+            200: CommissionSettlementSerializer,
+        },
+    )
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="mark-paid",
+    )
+    @db_tx.atomic
+    def mark_paid(
+        self,
+        request,
+        public_id=None,
+    ):
+        settlement = self.get_object()
+
+        self._validate_management_access(
+            settlement.employee.business
+        )
+
+        if (
+            settlement.status
+            == CommissionSettlement.STATUS_PAID
+        ):
+            raise ValidationError({
+                "status": (
+                    "La liquidación ya fue "
+                    "marcada como pagada."
+                )
+            })
+
+        if (
+            settlement.status
+            == CommissionSettlement
+            .STATUS_CANCELLED
+        ):
+            raise ValidationError({
+                "status": (
+                    "Una liquidación cancelada "
+                    "no puede marcarse como pagada."
+                )
+            })
+
+        settlement.status = (
+            CommissionSettlement.STATUS_PAID
+        )
+
+        settlement.paid_at = timezone.now()
+
+        settlement.save(
+            update_fields=[
+                "status",
+                "paid_at",
+                "updated_at",
+            ]
+        )
+
+        log_action(
+            request.user,
+            "MARK_COMMISSION_PAID",
+            settlement.__class__.__name__,
+            settlement.pk,
+        )
+
+        serializer = (
+            CommissionSettlementSerializer(
+                settlement,
+                context={
+                    "request": request,
+                },
+            )
+        )
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_200_OK,
+        )

@@ -1048,3 +1048,157 @@ class InventorySummary(models.Model):
         if self.variant_id:
             var = f" [{self.variant.variant_type.name}: {self.variant.label}]"
         return f"{self.business.business_name} · {self.product.title}{var} · {rng}"
+
+class EmployeeCommissionPlan(models.Model):
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        db_index=True,
+        editable=False,
+    )
+
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name="commission_plans",
+    )
+
+    percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+    )
+
+    valid_from = models.DateField()
+
+    valid_until = models.DateField(
+        null=True,
+        blank=True,
+    )
+
+    is_active = models.BooleanField(
+        default=True,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+    )
+
+    class Meta:
+        ordering = [
+            "-valid_from",
+        ]
+
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(percentage__gte=0)
+                    & models.Q(percentage__lte=100)
+                ),
+                name=(
+                    "employee_commission_percentage_"
+                    "between_0_and_100"
+                ),
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.employee.full_name} · "
+            f"{self.percentage}%"
+        )
+
+class CommissionSettlement(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_PAID = "paid"
+    STATUS_CANCELLED = "cancelled"
+
+    STATUSES = [
+        (STATUS_PENDING, "Pendiente"),
+        (STATUS_PAID, "Pagada"),
+        (STATUS_CANCELLED, "Cancelada"),
+    ]
+
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        db_index=True,
+        editable=False,
+    )
+
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        related_name="commission_settlements",
+    )
+
+    period_start = models.DateField()
+    period_end = models.DateField()
+
+    sales_count = models.PositiveIntegerField(
+        default=0,
+    )
+
+    sales_total = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+    )
+
+    commission_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+    )
+
+    commission_total = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUSES,
+        default=STATUS_PENDING,
+    )
+
+    paid_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name="created_commission_settlements",
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "employee",
+                    "period_start",
+                    "period_end",
+                ],
+                name=(
+                    "unique_employee_commission_"
+                    "settlement_per_period"
+                ),
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.employee.full_name} · "
+            f"{self.period_start} - {self.period_end}"
+        )

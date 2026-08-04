@@ -79,7 +79,7 @@ class ProductBusinessIsolationTests(
         response = self.client.post(
             "/api/products/",
             {
-                "business": self.business_b.pk,
+                "business": self.business_b.public_id,
                 "title": "Producto infiltrado",
                 "description": "",
                 "image_url": "",
@@ -109,7 +109,7 @@ class ProductBusinessIsolationTests(
                 f"{self.product_a.public_id}/"
             ),
             {
-                "business": self.business_b.pk,
+                "business": self.business_b.public_id,
             },
             format="json",
         )

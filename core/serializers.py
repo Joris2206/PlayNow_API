@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db import transaction as db_tx
+from django.db.models import Sum, Q
 from django.utils import timezone
 from rest_framework import serializers
 from .models import (
@@ -12,6 +13,7 @@ from .models import (
     Budget, Goal, GoalProgress,
     SalesSummary, SuppliersSummary, CustomersSummary,
     PaymentsSummary, DebtsSummary, InventorySummary,
+    CommissionSettlement, EmployeeCommissionPlan
 )
 
 
@@ -110,11 +112,11 @@ class EmployeeAccessCreateSerializer(serializers.Serializer):
     )
     role = serializers.ChoiceField(
         choices=[
-            (BusinessMembership.ROLE_ADMIN, "Administrador"),
-            (BusinessMembership.ROLE_CASHIER, "Cajero"),
-            (BusinessMembership.ROLE_SELLER, "Vendedor"),
-            (BusinessMembership.ROLE_INVENTORY, "Inventario"),
-            (BusinessMembership.ROLE_VIEWER, "Solo lectura"),
+            (BusinessMembership.ROLE_ADMIN, "admin"),
+            (BusinessMembership.ROLE_CASHIER, "cashier"),
+            (BusinessMembership.ROLE_SELLER, "seller"),
+            (BusinessMembership.ROLE_INVENTORY, "inventory"),
+            (BusinessMembership.ROLE_VIEWER, "viewer"),
         ]
     )
 
@@ -549,7 +551,7 @@ class EmployeeSerializer(
 
     class Meta:
         model = Employee
-        fields = ("public_id", "business", "full_name", "phone", "position", "status", "created_at", "updated_at")
+        fields = ("public_id", "business", "full_name", "phone", "email", "position", "status", "created_at", "updated_at")
         read_only_fields = (
             "public_id",
             "created_at",
@@ -588,21 +590,36 @@ class SupplierSerializer(
             "updated_at",
         )
 
-class TransactionDetailSerializer(serializers.ModelSerializer):
-    product = public_id_field(Product)
+class TransactionDetailSerializer(
+    serializers.ModelSerializer
+):
+    product = public_id_field(
+        Product
+    )
+
     variant = public_id_field(
         ProductVariant,
         required=False,
         allow_null=True,
     )
+
     quantity = serializers.IntegerField(
         min_value=1,
         max_value=100_000,
     )
+
+    unit_price = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+    )
+
     product_title = serializers.CharField(
         source="product.title",
         read_only=True,
     )
+
     variant_label = serializers.CharField(
         source="variant.label",
         read_only=True,
@@ -611,6 +628,7 @@ class TransactionDetailSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = TransactionDetail
+
         fields = (
             "public_id",
             "product",
@@ -621,8 +639,11 @@ class TransactionDetailSerializer(serializers.ModelSerializer):
             "unit_price",
             "total_price",
         )
+
         read_only_fields = (
             "public_id",
+            "product_title",
+            "variant_label",
             "total_price",
         )
 
@@ -640,7 +661,11 @@ class TransactionSerializer(
         required=False,
         allow_null=True,
     )
-    employee = public_id_read_only(allow_null=True)
+    employee = public_id_field(
+        Employee, 
+        required=False, 
+        allow_null=True
+    )
     payment_method = public_id_field(
         PaymentMethod,
         required=False,
@@ -680,15 +705,53 @@ class TransactionSerializer(
         allow_null=True,
     )
 
+    business_name = serializers.CharField(
+        source="business.business_name",
+        read_only=True,
+    )
+
+    customer_name = serializers.CharField(
+        source="customer.full_name",
+        read_only=True,
+        allow_null=True,
+    )
+
+    supplier_name = serializers.CharField(
+        source="supplier.name",
+        read_only=True,
+        allow_null=True,
+    )
+
+    employee_name = serializers.CharField(
+        source="employee.full_name",
+        read_only=True,
+        allow_null=True,
+    )
+
+    payment_method_name = serializers.CharField(
+        source="payment_method.name",
+        read_only=True,
+        allow_null=True,
+    )
+
+    status_name = serializers.CharField(
+        source="status.name",
+        read_only=True,
+    )
     class Meta:
         model = Transaction
         fields = (
             "public_id",
             "business",
+            "business_name",
             "customer",
+            "customer_name",
             "supplier",
+            "supplier_name",
             "employee",
+            "employee_name",
             "payment_method",
+            "payment_method_name",
             "type",
             "is_debt",
             "discount_percent",
@@ -696,6 +759,7 @@ class TransactionSerializer(
             "total_value",
             "expense_amount",
             "status",
+            "status_name",
             "invoice_number",
             "payment_status",
             "invoice_series",
@@ -710,7 +774,6 @@ class TransactionSerializer(
 
         read_only_fields = (
             "public_id",
-            "employee",
             "total_value",
             "is_debt",
             "created_at",
@@ -754,6 +817,26 @@ class TransactionSerializer(
                 )
             })
 
+        employee = attrs.get(
+            "employee",
+            getattr(
+                self.instance,
+                "employee",
+                None,
+            ),
+        )
+
+        if (
+            transaction_type == "sale"
+            and employee is None
+        ):
+            raise serializers.ValidationError({
+                "employee": (
+                    "Debe indicar el empleado al que "
+                    "pertenece la venta."
+                )
+            })
+
         self._validate_related_business(
             attrs=attrs,
             business=business,
@@ -794,6 +877,7 @@ class TransactionSerializer(
         related_fields = (
             "customer",
             "supplier",
+            "employee",
             "payment_method",
         )
 
@@ -1713,6 +1797,399 @@ class GoalProgressSerializer(serializers.ModelSerializer):
             ]
         )
         return progress
+
+class EmployeeCommissionPlanSerializer(
+    serializers.ModelSerializer
+):
+    employee = public_id_field(
+        Employee
+    )
+
+    employee_name = serializers.CharField(
+        source="employee.full_name",
+        read_only=True,
+    )
+
+    business = serializers.SlugRelatedField(
+        source="employee.business",
+        slug_field="public_id",
+        read_only=True,
+    )
+
+    business_name = serializers.CharField(
+        source="employee.business.business_name",
+        read_only=True,
+    )
+
+    class Meta:
+        model = EmployeeCommissionPlan
+
+        fields = (
+            "public_id",
+            "business",
+            "business_name",
+            "employee",
+            "employee_name",
+            "percentage",
+            "valid_from",
+            "valid_until",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+
+        read_only_fields = (
+            "public_id",
+            "business",
+            "business_name",
+            "employee_name",
+            "created_at",
+            "updated_at",
+        )
+
+    def validate_percentage(
+        self,
+        value,
+    ):
+        if (
+            value < Decimal("0.00")
+            or value > Decimal("100.00")
+        ):
+            raise serializers.ValidationError(
+                "El porcentaje debe estar "
+                "entre 0 y 100."
+            )
+
+        return value
+
+    def validate(self, attrs):
+        employee = attrs.get(
+            "employee",
+            getattr(
+                self.instance,
+                "employee",
+                None,
+            ),
+        )
+
+        valid_from = attrs.get(
+            "valid_from",
+            getattr(
+                self.instance,
+                "valid_from",
+                None,
+            ),
+        )
+
+        valid_until = attrs.get(
+            "valid_until",
+            getattr(
+                self.instance,
+                "valid_until",
+                None,
+            ),
+        )
+
+        if (
+            valid_from is not None
+            and valid_until is not None
+            and valid_until < valid_from
+        ):
+            raise serializers.ValidationError({
+                "valid_until": (
+                    "La fecha final no puede ser "
+                    "anterior a la fecha inicial."
+                )
+            })
+
+        if employee is None:
+            return attrs
+
+        overlapping_plans = (
+            EmployeeCommissionPlan.objects
+            .filter(
+                employee=employee,
+                is_active=True,
+            )
+        )
+
+        if self.instance is not None:
+            overlapping_plans = (
+                overlapping_plans.exclude(
+                    pk=self.instance.pk
+                )
+            )
+
+        if valid_from is not None:
+            overlapping_plans = (
+                overlapping_plans.filter(
+                    Q(valid_until__isnull=True)
+                    | Q(
+                        valid_until__gte=valid_from
+                    )
+                )
+            )
+
+        if valid_until is not None:
+            overlapping_plans = (
+                overlapping_plans.filter(
+                    valid_from__lte=valid_until
+                )
+            )
+
+        if overlapping_plans.exists():
+            raise serializers.ValidationError({
+                "valid_from": (
+                    "El empleado ya tiene un plan "
+                    "de comisión activo que coincide "
+                    "con ese período."
+                )
+            })
+
+        return attrs
+
+class CommissionSettlementSerializer(
+    serializers.ModelSerializer
+):
+    employee = public_id_read_only()
+
+    employee_name = serializers.CharField(
+        source="employee.full_name",
+        read_only=True,
+    )
+
+    employee_position = (
+        serializers.CharField(
+            source="employee.position",
+            read_only=True,
+        )
+    )
+
+    business = serializers.SlugRelatedField(
+        source="employee.business",
+        slug_field="public_id",
+        read_only=True,
+    )
+
+    business_name = serializers.CharField(
+        source=(
+            "employee.business."
+            "business_name"
+        ),
+        read_only=True,
+    )
+
+    business_currency = (
+        serializers.CharField(
+            source="employee.business.currency",
+            read_only=True,
+        )
+    )
+
+    created_by = serializers.SlugRelatedField(
+        slug_field="public_id",
+        read_only=True,
+    )
+
+    created_by_name = serializers.CharField(
+        source="created_by.full_name",
+        read_only=True,
+    )
+
+    class Meta:
+        model = CommissionSettlement
+
+        fields = (
+            "public_id",
+            "business",
+            "business_name",
+            "business_currency",
+            "employee",
+            "employee_name",
+            "employee_position",
+            "period_start",
+            "period_end",
+            "sales_count",
+            "sales_total",
+            "commission_percentage",
+            "commission_total",
+            "status",
+            "paid_at",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "updated_at",
+        )
+
+        read_only_fields = fields
+
+class CommissionSettlementCreateSerializer(
+    serializers.Serializer
+):
+    employee = public_id_field(
+        Employee
+    )
+
+    period_start = serializers.DateField()
+
+    period_end = serializers.DateField()
+
+    def validate(self, attrs):
+        employee = attrs["employee"]
+        period_start = attrs["period_start"]
+        period_end = attrs["period_end"]
+
+        if period_end < period_start:
+            raise serializers.ValidationError({
+                "period_end": (
+                    "La fecha final no puede ser "
+                    "anterior a la fecha inicial."
+                )
+            })
+
+        existing_settlement = (
+            CommissionSettlement.objects
+            .filter(
+                employee=employee,
+                period_start=period_start,
+                period_end=period_end,
+            )
+            .exists()
+        )
+
+        if existing_settlement:
+            raise serializers.ValidationError({
+                "period": (
+                    "Ya existe una liquidación para "
+                    "este empleado y período."
+                )
+            })
+
+        commission_plan = (
+            EmployeeCommissionPlan.objects
+            .filter(
+                employee=employee,
+                is_active=True,
+                valid_from__lte=period_end,
+            )
+            .filter(
+                Q(valid_until__isnull=True)
+                | Q(
+                    valid_until__gte=period_start
+                )
+            )
+            .order_by("-valid_from")
+            .first()
+        )
+
+        if commission_plan is None:
+            raise serializers.ValidationError({
+                "commission_plan": (
+                    "El empleado no tiene un plan "
+                    "de comisión vigente para "
+                    "este período."
+                )
+            })
+
+        attrs["commission_plan"] = (
+            commission_plan
+        )
+
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context["request"]
+
+        employee = validated_data[
+            "employee"
+        ]
+
+        period_start = validated_data[
+            "period_start"
+        ]
+
+        period_end = validated_data[
+            "period_end"
+        ]
+
+        commission_plan = validated_data[
+            "commission_plan"
+        ]
+
+        excluded_status_names = [
+            "Eliminado",
+            "Anulado",
+            "Cancelado",
+            "Void",
+            "Deleted",
+        ]
+
+        sales = (
+            Transaction.objects
+            .filter(
+                business=employee.business,
+                employee=employee,
+                type="sale",
+                created_at__date__gte=(
+                    period_start
+                ),
+                created_at__date__lte=(
+                    period_end
+                ),
+            )
+            .exclude(
+                status__name__in=(
+                    excluded_status_names
+                )
+            )
+        )
+
+        summary = sales.aggregate(
+            sales_total=Sum("total_value"),
+        )
+
+        sales_count = sales.count()
+
+        sales_total = (
+            summary["sales_total"]
+            or Decimal("0.00")
+        ).quantize(
+            Decimal("0.01")
+        )
+
+        commission_percentage = (
+            commission_plan.percentage
+        )
+
+        commission_total = (
+            sales_total
+            * commission_percentage
+            / Decimal("100.00")
+        ).quantize(
+            Decimal("0.01")
+        )
+
+        return (
+            CommissionSettlement.objects
+            .create(
+                employee=employee,
+                period_start=period_start,
+                period_end=period_end,
+                sales_count=sales_count,
+                sales_total=sales_total,
+                commission_percentage=(
+                    commission_percentage
+                ),
+                commission_total=(
+                    commission_total
+                ),
+                status=(
+                    CommissionSettlement
+                    .STATUS_PENDING
+                ),
+                created_by=request.user,
+            )
+        )
 
 # ---------- Lecturas (solo por si las quieres exponer) ----------
 class StockMovementSerializer(serializers.ModelSerializer):

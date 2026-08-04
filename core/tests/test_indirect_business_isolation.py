@@ -94,7 +94,9 @@ class ProductVariantTypeIsolationTests(
         response = self.client.post(
             "/api/variant-types/",
             {
-                "product": self.product_b.pk,
+                "product": str(
+                    self.product_b.public_id
+                ),
                 "name": "Material",
             },
             format="json",
@@ -119,7 +121,9 @@ class ProductVariantTypeIsolationTests(
                 f"{self.variant_type_a.public_id}/"
             ),
             {
-                "product": self.product_b.pk,
+                "product": str(
+                    self.product_b.public_id
+                ),
             },
             format="json",
         )
@@ -231,7 +235,9 @@ class ProductVariantIsolationTests(
         response = self.client.post(
             "/api/variants/",
             {
-                "variant_type": self.variant_type_b.pk,
+                "variant_type": str(
+                    self.variant_type_b.public_id
+                ),
                 "label": "Azul",
                 "additional_price": "10.00",
                 "stock": 5,
@@ -258,7 +264,9 @@ class ProductVariantIsolationTests(
                 f"{self.variant_a.public_id}/"
             ),
             {
-                "variant_type": self.variant_type_b.pk,
+                "variant_type": str(
+                    self.variant_type_b.public_id
+                ),
             },
             format="json",
         )
