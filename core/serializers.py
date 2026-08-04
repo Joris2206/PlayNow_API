@@ -1,5 +1,5 @@
 from decimal import Decimal
-
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction as db_tx
 from django.db.models import Sum, Q
 from django.utils import timezone
@@ -13,7 +13,8 @@ from .models import (
     Budget, Goal, GoalProgress,
     SalesSummary, SuppliersSummary, CustomersSummary,
     PaymentsSummary, DebtsSummary, InventorySummary,
-    CommissionSettlement, EmployeeCommissionPlan
+    CommissionSettlement, EmployeeCommissionPlan,
+    CashMovement, CashRegister
 )
 
 
@@ -2190,6 +2191,378 @@ class CommissionSettlementCreateSerializer(
                 created_by=request.user,
             )
         )
+
+class CashRegisterSerializer(
+    serializers.ModelSerializer
+):
+    business = public_id_read_only()
+    employee = public_id_read_only(
+        allow_null=True,
+    )
+
+    opened_by = serializers.SlugRelatedField(
+        slug_field="public_id",
+        read_only=True,
+        allow_null=True,
+    )
+
+    closed_by = serializers.SlugRelatedField(
+        slug_field="public_id",
+        read_only=True,
+        allow_null=True,
+    )
+
+    business_name = serializers.CharField(
+        source="business.business_name",
+        read_only=True,
+    )
+
+    business_currency = serializers.CharField(
+        source="business.currency",
+        read_only=True,
+    )
+
+    employee_name = serializers.CharField(
+        source="employee.full_name",
+        read_only=True,
+        allow_null=True,
+    )
+
+    opened_by_name = serializers.CharField(
+        source="opened_by.full_name",
+        read_only=True,
+        allow_null=True,
+    )
+
+    closed_by_name = serializers.CharField(
+        source="closed_by.full_name",
+        read_only=True,
+        allow_null=True,
+    )
+
+    class Meta:
+        model = CashRegister
+
+        fields = (
+            "public_id",
+
+            "business",
+            "business_name",
+            "business_currency",
+
+            "employee",
+            "employee_name",
+
+            "opened_by",
+            "opened_by_name",
+            "closed_by",
+            "closed_by_name",
+
+            "open_time",
+            "close_time",
+
+            "opening_balance",
+            "closing_balance",
+            "expected_closing_balance",
+            "difference",
+
+            "opening_notes",
+            "closing_notes",
+
+            "status",
+
+            "created_at",
+            "updated_at",
+        )
+
+        read_only_fields = fields
+
+class CashRegisterOpenSerializer(
+    serializers.ModelSerializer
+):
+    business = public_id_field(
+        Business
+    )
+
+    employee = public_id_field(
+        Employee
+    )
+
+    opening_balance = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        min_value=Decimal("0.00"),
+    )
+
+    opening_notes = serializers.CharField(
+        required=False,
+        allow_blank=True,
+    )
+
+    class Meta:
+        model = CashRegister
+
+        fields = (
+            "business",
+            "employee",
+            "opening_balance",
+            "opening_notes",
+        )
+
+    def validate(self, attrs):
+        business = attrs["business"]
+        employee = attrs["employee"]
+
+        if employee.business_id != business.id:
+            raise serializers.ValidationError({
+                "employee": (
+                    "El empleado debe pertenecer "
+                    "al negocio seleccionado."
+                )
+            })
+
+        open_register_exists = (
+            CashRegister.objects
+            .filter(
+                business=business,
+                status=CashRegister.STATUS_OPEN,
+            )
+            .exists()
+        )
+
+        if open_register_exists:
+            raise serializers.ValidationError({
+                "business": (
+                    "Este negocio ya tiene una "
+                    "caja abierta."
+                )
+            })
+
+        return attrs
+
+class CashRegisterCloseSerializer(
+    serializers.Serializer
+):
+    closing_balance = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        min_value=Decimal("0.00"),
+    )
+
+    closing_notes = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default="",
+    )
+
+class CashMovementSerializer(
+    serializers.ModelSerializer
+):
+    cash_register = public_id_field(
+        CashRegister
+    )
+
+    employee = public_id_field(
+        Employee,
+        required=False,
+        allow_null=True,
+    )
+
+    payment_method = public_id_field(
+        PaymentMethod,
+        required=False,
+        allow_null=True,
+    )
+
+    created_by = serializers.SlugRelatedField(
+        slug_field="public_id",
+        read_only=True,
+    )
+
+    cash_register_status = serializers.CharField(
+        source="cash_register.status",
+        read_only=True,
+    )
+
+    business = serializers.SlugRelatedField(
+        source="cash_register.business",
+        slug_field="public_id",
+        read_only=True,
+    )
+
+    business_name = serializers.CharField(
+        source="cash_register.business.business_name",
+        read_only=True,
+    )
+
+    employee_name = serializers.CharField(
+        source="employee.full_name",
+        read_only=True,
+        allow_null=True,
+    )
+
+    payment_method_name = serializers.CharField(
+        source="payment_method.name",
+        read_only=True,
+        allow_null=True,
+    )
+
+    created_by_name = serializers.CharField(
+        source="created_by.full_name",
+        read_only=True,
+    )
+
+    signed_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        read_only=True,
+    )
+
+    amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        min_value=Decimal("0.01"),
+    )
+
+    class Meta:
+        model = CashMovement
+
+        fields = (
+            "public_id",
+
+            "cash_register",
+            "cash_register_status",
+
+            "business",
+            "business_name",
+
+            "employee",
+            "employee_name",
+
+            "payment_method",
+            "payment_method_name",
+
+            "movement_type",
+            "amount",
+            "signed_amount",
+            "note",
+
+            "created_by",
+            "created_by_name",
+            "created_at",
+        )
+
+        read_only_fields = (
+            "public_id",
+            "cash_register_status",
+            "business",
+            "business_name",
+            "employee_name",
+            "payment_method_name",
+            "signed_amount",
+            "created_by",
+            "created_by_name",
+            "created_at",
+        )
+
+    def validate(self, attrs):
+        instance = self.instance
+
+        cash_register = attrs.get(
+            "cash_register",
+            getattr(
+                instance,
+                "cash_register",
+                None,
+            ),
+        )
+
+        employee = attrs.get(
+            "employee",
+            getattr(
+                instance,
+                "employee",
+                None,
+            ),
+        )
+
+        payment_method = attrs.get(
+            "payment_method",
+            getattr(
+                instance,
+                "payment_method",
+                None,
+            ),
+        )
+
+        movement_type = attrs.get(
+            "movement_type",
+            getattr(
+                instance,
+                "movement_type",
+                None,
+            ),
+        )
+
+        if cash_register is None:
+            raise serializers.ValidationError({
+                "cash_register": (
+                    "Debes indicar una caja."
+                )
+            })
+
+        if (
+            cash_register.status
+            != CashRegister.STATUS_OPEN
+        ):
+            raise serializers.ValidationError({
+                "cash_register": (
+                    "No se pueden registrar "
+                    "movimientos en una caja cerrada."
+                )
+            })
+
+        if (
+            employee is not None
+            and employee.business_id
+            != cash_register.business_id
+        ):
+            raise serializers.ValidationError({
+                "employee": (
+                    "El empleado no pertenece al "
+                    "negocio de la caja."
+                )
+            })
+
+        if (
+            payment_method is not None
+            and payment_method.business_id
+            != cash_register.business_id
+        ):
+            raise serializers.ValidationError({
+                "payment_method": (
+                    "El método de pago no pertenece "
+                    "al negocio de la caja."
+                )
+            })
+
+        employee_required_types = {
+            CashMovement.TYPE_EMPLOYEE_ADVANCE,
+            CashMovement.TYPE_EMPLOYEE_REPAYMENT,
+        }
+
+        if (
+            movement_type in employee_required_types
+            and employee is None
+        ):
+            raise serializers.ValidationError({
+                "employee": (
+                    "Debes indicar el empleado para "
+                    "este tipo de movimiento."
+                )
+            })
+
+        return attrs
 
 # ---------- Lecturas (solo por si las quieres exponer) ----------
 class StockMovementSerializer(serializers.ModelSerializer):

@@ -20,13 +20,17 @@ from rest_framework.throttling import ScopedRateThrottle
 from .serializers import (
     BusinessMembershipSerializer,
     BusinessMembershipUpdateSerializer,
+    CashMovementSerializer,
+    CashRegisterCloseSerializer,
+    CashRegisterOpenSerializer,
+    CashRegisterSerializer,
     EmployeeAccessCreateSerializer,
     HealthSerializer,
 )
 from .services.serializer import ChangePasswordSerializer, PasswordResetRequestSerializer, PasswordResetConfirmSerializer
 from django.conf import settings
 from django.shortcuts import get_object_or_404
-
+from django.utils import timezone as django_timezone
 
 FRONTEND_RESET_URL = settings.FRONTEND_RESET_URL
 
@@ -357,7 +361,7 @@ GOAL_PROGRESS_CREATE_EXAMPLE = OpenApiExample(
 )
 
 from .models import (
-    BusinessMembership, User, Business, EntityStatus,
+    BusinessMembership, CashRegister, User, Business, EntityStatus,
     ProductCategory, Product, ProductVariantType, ProductVariant,
     Employee, Customer, Supplier, PaymentMethod,
     Transaction, TransactionDetail, StockMovement,
@@ -371,7 +375,9 @@ from .serializers import (
     EmployeeSerializer, CustomerSerializer, SupplierSerializer, PaymentMethodSerializer,
     TransactionSerializer, TransactionDetailSerializer, StockMovementSerializer,
     DebtSerializer, DebtPaymentSerializer, NotificationSerializer, ReminderSerializer,
-    BudgetSerializer, GoalSerializer, GoalProgressSerializer, CommissionSettlementCreateSerializer, CommissionSettlementSerializer, EmployeeCommissionPlanSerializer
+    BudgetSerializer, GoalSerializer, GoalProgressSerializer, 
+    CommissionSettlementCreateSerializer, CommissionSettlementSerializer, EmployeeCommissionPlanSerializer,
+    CashMovement
 )
 from .permissions import IsOwnerOrBusinessOwner
 
@@ -403,6 +409,220 @@ def validate_report_business_access(
             "administrador puede consultar "
             "este reporte."
         )
+
+def calculate_cash_register_summary(
+    cash_register,
+    *,
+    until=None,
+):
+    until = until or django_timezone.now()
+
+    excluded_statuses = [
+        "Eliminado",
+        "Anulado",
+        "Cancelado",
+        "Void",
+        "Deleted",
+    ]
+
+    base_transactions = (
+        Transaction.objects
+        .filter(
+            business=cash_register.business,
+            created_at__gte=cash_register.open_time,
+            created_at__lte=until,
+        )
+        .exclude(
+            status__name__in=excluded_statuses
+        )
+    )
+
+    def transaction_total(
+        transaction_type,
+        method_type,
+    ):
+        result = (
+            base_transactions
+            .filter(
+                type=transaction_type,
+                payment_status="paid",
+                payment_method__method_type=method_type,
+            )
+            .aggregate(
+                total=Sum("total_value")
+            )
+        )
+
+        return (
+            result["total"]
+            or Decimal("0.00")
+        )
+
+    cash_sales = transaction_total(
+        "sale",
+        PaymentMethod.TYPE_CASH,
+    )
+
+    card_sales = transaction_total(
+        "sale",
+        PaymentMethod.TYPE_CARD,
+    )
+
+    transfer_sales = transaction_total(
+        "sale",
+        PaymentMethod.TYPE_TRANSFER,
+    )
+
+    other_sales = transaction_total(
+        "sale",
+        PaymentMethod.TYPE_OTHER,
+    )
+
+    cash_purchases = transaction_total(
+        "purchase",
+        PaymentMethod.TYPE_CASH,
+    )
+
+    cash_expenses = transaction_total(
+        "expense",
+        PaymentMethod.TYPE_CASH,
+    )
+
+    cash_debt_payments = (
+        DebtPayment.objects
+        .filter(
+            debt__transaction__business=(
+                cash_register.business
+            ),
+            payment_method__method_type=(
+                PaymentMethod.TYPE_CASH
+            ),
+            created_at__gte=(
+                cash_register.open_time
+            ),
+            created_at__lte=until,
+        )
+        .aggregate(
+            total=Sum("amount")
+        )
+        .get("total")
+        or Decimal("0.00")
+    )
+
+    movements = (
+        CashMovement.objects
+        .filter(
+            cash_register=cash_register,
+            created_at__lte=until,
+        )
+    )
+
+    movement_totals = {
+        movement_type: Decimal("0.00")
+        for movement_type, _
+        in CashMovement.MOVEMENT_TYPES
+    }
+
+    movement_rows = (
+        movements
+        .values("movement_type")
+        .annotate(total=Sum("amount"))
+    )
+
+    for row in movement_rows:
+        movement_totals[
+            row["movement_type"]
+        ] = row["total"] or Decimal("0.00")
+
+    deposits = movement_totals[
+        CashMovement.TYPE_DEPOSIT
+    ]
+
+    withdrawals = movement_totals[
+        CashMovement.TYPE_WITHDRAWAL
+    ]
+
+    employee_advances = movement_totals[
+        CashMovement.TYPE_EMPLOYEE_ADVANCE
+    ]
+
+    employee_repayments = movement_totals[
+        CashMovement.TYPE_EMPLOYEE_REPAYMENT
+    ]
+
+    other_income = movement_totals[
+        CashMovement.TYPE_OTHER_INCOME
+    ]
+
+    other_expense = movement_totals[
+        CashMovement.TYPE_OTHER_EXPENSE
+    ]
+
+    total_income_movements = (
+        deposits
+        + employee_repayments
+        + other_income
+    )
+
+    total_outgoing_movements = (
+        withdrawals
+        + employee_advances
+        + other_expense
+    )
+
+    expected_closing_balance = (
+        cash_register.opening_balance
+        + cash_sales
+        + cash_debt_payments
+        + total_income_movements
+        - cash_purchases
+        - cash_expenses
+        - total_outgoing_movements
+    ).quantize(
+        Decimal("0.01")
+    )
+
+    return {
+        "period": {
+            "open_time": cash_register.open_time,
+            "until": until,
+        },
+        "opening_balance": (
+            cash_register.opening_balance
+        ),
+        "sales": {
+            "cash": cash_sales,
+            "card": card_sales,
+            "transfer": transfer_sales,
+            "other": other_sales,
+            "total": (
+                cash_sales
+                + card_sales
+                + transfer_sales
+                + other_sales
+            ),
+        },
+        "cash_purchases": cash_purchases,
+        "cash_expenses": cash_expenses,
+        "cash_debt_payments": (
+            cash_debt_payments
+        ),
+        "movements": {
+            "deposits": deposits,
+            "withdrawals": withdrawals,
+            "employee_advances": (
+                employee_advances
+            ),
+            "employee_repayments": (
+                employee_repayments
+            ),
+            "other_income": other_income,
+            "other_expense": other_expense,
+        },
+        "expected_closing_balance": (
+            expected_closing_balance
+        ),
+    }
 
 # -------- Healthcheck (ya lo usaste en /api/health/) --------
 @extend_schema(
@@ -3613,4 +3833,560 @@ class CommissionSettlementViewSet(
         return Response(
             serializer.data,
             status=status.HTTP_200_OK,
+        )
+
+@extend_schema_view(
+    list=extend_schema(
+        tags=["Cash Registers"],
+        summary="Listar cajas",
+    ),
+    retrieve=extend_schema(
+        tags=["Cash Registers"],
+        summary="Consultar una caja",
+    ),
+    create=extend_schema(
+        tags=["Cash Registers"],
+        summary="Abrir caja",
+        request=CashRegisterOpenSerializer,
+        responses={
+            201: CashRegisterSerializer,
+        },
+    ),
+)
+class CashRegisterViewSet(
+    viewsets.GenericViewSet,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+):
+    queryset = (
+        CashRegister.objects
+        .select_related(
+            "business",
+            "employee",
+            "opened_by",
+            "closed_by",
+        )
+        .order_by("-open_time")
+    )
+
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    lookup_field = "public_id"
+    lookup_url_kwarg = "public_id"
+
+    pagination_class = (
+        StandardResultsSetPagination
+    )
+
+    filterset_fields = [
+        "business__public_id",
+        "employee__public_id",
+        "status",
+    ]
+
+    ordering_fields = [
+        "open_time",
+        "close_time",
+        "opening_balance",
+        "closing_balance",
+        "difference",
+    ]
+
+    ordering = [
+        "-open_time",
+    ]
+
+    read_roles = [
+        BusinessMembership.ROLE_OWNER,
+        BusinessMembership.ROLE_ADMIN,
+        BusinessMembership.ROLE_CASHIER,
+    ]
+
+    management_roles = [
+        BusinessMembership.ROLE_OWNER,
+        BusinessMembership.ROLE_ADMIN,
+        BusinessMembership.ROLE_CASHIER,
+    ]
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return CashRegisterOpenSerializer
+
+        if self.action == "close":
+            return CashRegisterCloseSerializer
+
+        return CashRegisterSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+
+        if user.is_superuser:
+            return queryset
+
+        return (
+            queryset
+            .filter(
+                business__memberships__user=user,
+                business__memberships__is_active=True,
+                business__memberships__role__in=(
+                    self.read_roles
+                ),
+            )
+            .distinct()
+        )
+
+    def _validate_cash_access(
+        self,
+        business,
+        *,
+        roles=None,
+    ):
+        user = self.request.user
+
+        if user.is_superuser:
+            return
+
+        allowed_roles = (
+            roles
+            or self.management_roles
+        )
+
+        has_access = (
+            BusinessMembership.objects
+            .filter(
+                user=user,
+                business=business,
+                is_active=True,
+                role__in=allowed_roles,
+            )
+            .exists()
+        )
+
+        if not has_access:
+            raise PermissionDenied(
+                "No tienes permiso para gestionar "
+                "la caja de este negocio."
+            )
+
+    @db_tx.atomic
+    def create(
+        self,
+        request,
+        *args,
+        **kwargs,
+    ):
+        serializer = self.get_serializer(
+            data=request.data
+        )
+
+        serializer.is_valid(
+            raise_exception=True
+        )
+
+        business = serializer.validated_data[
+            "business"
+        ]
+
+        employee = serializer.validated_data[
+            "employee"
+        ]
+
+        self._validate_cash_access(
+            business
+        )
+
+        cash_register = serializer.save(
+            opened_by=request.user,
+            open_time=django_timezone.now(),
+            status=CashRegister.STATUS_OPEN,
+        )
+
+        log_action(
+            request.user,
+            "OPEN_CASH_REGISTER",
+            cash_register.__class__.__name__,
+            cash_register.pk,
+        )
+
+        response_serializer = (
+            CashRegisterSerializer(
+                cash_register,
+                context={
+                    "request": request,
+                },
+            )
+        )
+
+        return Response(
+            response_serializer.data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(
+        tags=["Cash Registers"],
+        summary="Vista previa del cierre",
+        responses={
+            200: OpenApiResponse(
+                description=(
+                    "Resumen calculado de la caja."
+                )
+            ),
+        },
+    )
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="closing-preview",
+    )
+    def closing_preview(
+        self,
+        request,
+        public_id=None,
+    ):
+        cash_register = self.get_object()
+
+        self._validate_cash_access(
+            cash_register.business
+        )
+
+        if (
+            cash_register.status
+            != CashRegister.STATUS_OPEN
+        ):
+            raise ValidationError({
+                "status": (
+                    "Solo se puede calcular la "
+                    "vista previa de una caja abierta."
+                )
+            })
+
+        summary = calculate_cash_register_summary(
+            cash_register
+        )
+
+        return Response(
+            summary,
+            status=status.HTTP_200_OK,
+        )
+
+    @extend_schema(
+        tags=["Cash Registers"],
+        summary="Cerrar caja",
+        request=CashRegisterCloseSerializer,
+        responses={
+            200: CashRegisterSerializer,
+        },
+    )
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="close",
+    )
+    @db_tx.atomic
+    def close(
+        self,
+        request,
+        public_id=None,
+    ):
+        cash_register = (
+            CashRegister.objects
+            .select_for_update()
+            .select_related(
+                "business",
+                "employee",
+                "opened_by",
+                "closed_by",
+            )
+            .get(
+                public_id=public_id
+            )
+        )
+
+        self.check_object_permissions(
+            request,
+            cash_register,
+        )
+
+        self._validate_cash_access(
+            cash_register.business
+        )
+
+        if (
+            cash_register.status
+            != CashRegister.STATUS_OPEN
+        ):
+            raise ValidationError({
+                "status": (
+                    "Esta caja ya está cerrada."
+                )
+            })
+
+        serializer = (
+            CashRegisterCloseSerializer(
+                data=request.data
+            )
+        )
+
+        serializer.is_valid(
+            raise_exception=True
+        )
+
+        close_time = django_timezone.now()
+
+        summary = calculate_cash_register_summary(
+            cash_register,
+            until=close_time,
+        )
+
+        expected_balance = summary[
+            "expected_closing_balance"
+        ]
+
+        closing_balance = (
+            serializer.validated_data[
+                "closing_balance"
+            ]
+        )
+
+        difference = (
+            closing_balance
+            - expected_balance
+        ).quantize(
+            Decimal("0.01")
+        )
+
+        cash_register.close_time = close_time
+        cash_register.closing_balance = (
+            closing_balance
+        )
+        cash_register.expected_closing_balance = (
+            expected_balance
+        )
+        cash_register.difference = difference
+        cash_register.closing_notes = (
+            serializer.validated_data.get(
+                "closing_notes",
+                "",
+            )
+        )
+        cash_register.closed_by = request.user
+        cash_register.status = (
+            CashRegister.STATUS_CLOSED
+        )
+
+        cash_register.save(
+            update_fields=[
+                "close_time",
+                "closing_balance",
+                "expected_closing_balance",
+                "difference",
+                "closing_notes",
+                "closed_by",
+                "status",
+                "updated_at",
+            ]
+        )
+
+        log_action(
+            request.user,
+            "CLOSE_CASH_REGISTER",
+            cash_register.__class__.__name__,
+            cash_register.pk,
+            extra={
+                "expected": str(
+                    expected_balance
+                ),
+                "counted": str(
+                    closing_balance
+                ),
+                "difference": str(
+                    difference
+                ),
+            },
+        )
+
+        response_serializer = (
+            CashRegisterSerializer(
+                cash_register,
+                context={
+                    "request": request,
+                },
+            )
+        )
+
+        return Response(
+            response_serializer.data,
+            status=status.HTTP_200_OK,
+        )
+
+@extend_schema_view(
+    list=extend_schema(
+        tags=["Cash Movements"],
+        summary="Listar movimientos de caja",
+    ),
+    retrieve=extend_schema(
+        tags=["Cash Movements"],
+        summary="Consultar movimiento de caja",
+    ),
+    create=extend_schema(
+        tags=["Cash Movements"],
+        summary="Registrar movimiento de caja",
+    ),
+)
+class CashMovementViewSet(
+    viewsets.GenericViewSet,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+):
+    queryset = (
+        CashMovement.objects
+        .select_related(
+            "cash_register",
+            "cash_register__business",
+            "employee",
+            "payment_method",
+            "created_by",
+        )
+        .order_by("-created_at")
+    )
+
+    serializer_class = CashMovementSerializer
+
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    lookup_field = "public_id"
+    lookup_url_kwarg = "public_id"
+
+    pagination_class = (
+        StandardResultsSetPagination
+    )
+
+    filterset_fields = [
+        "cash_register__public_id",
+        "cash_register__business__public_id",
+        "employee__public_id",
+        "payment_method__public_id",
+        "movement_type",
+    ]
+
+    ordering_fields = [
+        "created_at",
+        "amount",
+        "movement_type",
+    ]
+
+    ordering = [
+        "-created_at",
+    ]
+
+    allowed_roles = [
+        BusinessMembership.ROLE_OWNER,
+        BusinessMembership.ROLE_ADMIN,
+        BusinessMembership.ROLE_CASHIER,
+    ]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+
+        if user.is_superuser:
+            return queryset
+
+        return (
+            queryset
+            .filter(
+                cash_register__business__memberships__user=user,
+                cash_register__business__memberships__is_active=True,
+                cash_register__business__memberships__role__in=(
+                    self.allowed_roles
+                ),
+            )
+            .distinct()
+        )
+
+    def _validate_access(
+        self,
+        business,
+    ):
+        user = self.request.user
+
+        if user.is_superuser:
+            return
+
+        has_access = (
+            BusinessMembership.objects
+            .filter(
+                user=user,
+                business=business,
+                is_active=True,
+                role__in=self.allowed_roles,
+            )
+            .exists()
+        )
+
+        if not has_access:
+            raise PermissionDenied(
+                "No tienes permiso para registrar "
+                "movimientos en esta caja."
+            )
+
+    @db_tx.atomic
+    def perform_create(
+        self,
+        serializer,
+    ):
+        cash_register = (
+            serializer.validated_data[
+                "cash_register"
+            ]
+        )
+
+        locked_register = (
+            CashRegister.objects
+            .select_for_update()
+            .get(
+                pk=cash_register.pk
+            )
+        )
+
+        self._validate_access(
+            locked_register.business
+        )
+
+        if (
+            locked_register.status
+            != CashRegister.STATUS_OPEN
+        ):
+            raise ValidationError({
+                "cash_register": (
+                    "No se pueden registrar "
+                    "movimientos en una caja cerrada."
+                )
+            })
+
+        movement = serializer.save(
+            cash_register=locked_register,
+            created_by=self.request.user,
+        )
+
+        log_action(
+            self.request.user,
+            "CREATE_CASH_MOVEMENT",
+            movement.__class__.__name__,
+            movement.pk,
+            extra={
+                "movement_type": (
+                    movement.movement_type
+                ),
+                "amount": str(
+                    movement.amount
+                ),
+            },
         )

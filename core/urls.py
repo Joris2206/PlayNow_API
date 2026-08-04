@@ -9,7 +9,8 @@ from .views import (
     NotificationViewSet, ReminderViewSet,
     BudgetViewSet, GoalViewSet, GoalProgressViewSet,
     StockMovementViewSet, UserViewSet, PasswordResetRequestView, PasswordResetConfirmView,
-    EmployeeCommissionPlanViewSet, EmployeeCommissionPreviewView, EmployeeSalesReportView
+    EmployeeCommissionPlanViewSet, EmployeeCommissionPreviewView, EmployeeSalesReportView,
+    CashMovementViewSet, CashRegisterViewSet
 )
 
 router = DefaultRouter()
@@ -57,6 +58,10 @@ router.register(r'users', UserViewSet, basename='user')
 #Comission Plans
 router.register(r'commission-plans', EmployeeCommissionPlanViewSet, basename='commission-plan')
 router.register(r"commission-settlements", CommissionSettlementViewSet, basename="commission-settlement")
+
+#Caja
+router.register(r'cash-movements', CashMovementViewSet, basename='cash-movement')
+router.register(r'cash-registers', CashRegisterViewSet, basename='cash-register')
 
 urlpatterns = [
     path("reports/employee-sales/", EmployeeSalesReportView.as_view(), name="employee-sales-report"),

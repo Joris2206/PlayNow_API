@@ -1,3 +1,4 @@
+from django.utils import timezone as django_timezone
 import uuid
 from decimal import Decimal
 
@@ -422,6 +423,18 @@ class Supplier(models.Model):
         return f"{self.name}{phone}"
     
 class PaymentMethod(models.Model):
+    TYPE_CASH = "cash"
+    TYPE_CARD = "card"
+    TYPE_TRANSFER = "transfer"
+    TYPE_OTHER = "other"
+
+    METHOD_TYPES = [
+        (TYPE_CASH, "Efectivo"),
+        (TYPE_CARD, "Tarjeta"),
+        (TYPE_TRANSFER, "Transferencia"),
+        (TYPE_OTHER, "Otro"),
+    ]
+
     public_id = models.UUIDField(
         default=uuid.uuid4,
         unique=True,
@@ -437,6 +450,12 @@ class PaymentMethod(models.Model):
 
     name = models.CharField(
         max_length=100,
+    )
+
+    method_type = models.CharField(
+        max_length=20,
+        choices=METHOD_TYPES,
+        default=TYPE_OTHER,
     )
 
     status = models.ForeignKey(
@@ -463,17 +482,415 @@ class PaymentMethod(models.Model):
                 name="unique_payment_method_per_business",
             ),
         ]
+
         indexes = [
             models.Index(
                 fields=["business", "status"],
                 name="paymethod_biz_status_idx",
             ),
+            models.Index(
+                fields=["business", "method_type"],
+                name="paymethod_biz_type_idx",
+            ),
         ]
+
         ordering = ["name"]
 
     def __str__(self):
         return self.name
 
+class CashRegister(models.Model):
+    STATUS_OPEN = "open"
+    STATUS_CLOSED = "closed"
+
+    STATUSES = [
+        (STATUS_OPEN, "Abierta"),
+        (STATUS_CLOSED, "Cerrada"),
+    ]
+
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        db_index=True,
+        editable=False,
+    )
+
+    business = models.ForeignKey(
+        "Business",
+        on_delete=models.CASCADE,
+        related_name="cash_registers",
+    )
+
+    employee = models.ForeignKey(
+        "Employee",
+        on_delete=models.PROTECT,
+        related_name="cash_registers",
+    )
+
+    opened_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="opened_cash_registers",
+    )
+
+    closed_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="closed_cash_registers",
+    )
+
+    open_time = models.DateTimeField(
+        default=django_timezone.now,
+    )
+
+    close_time = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    opening_balance = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+    )
+
+    # Dinero contado físicamente al cerrar.
+    closing_balance = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+
+    # Saldo que el sistema esperaba encontrar.
+    expected_closing_balance = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+
+    # closing_balance - expected_closing_balance
+    difference = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+
+    opening_notes = models.TextField(
+        blank=True,
+    )
+
+    closing_notes = models.TextField(
+        blank=True,
+    )
+
+    status = models.CharField(
+        max_length=10,
+        choices=STATUSES,
+        default=STATUS_OPEN,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["business"],
+                condition=Q(status="open"),
+                name="one_open_register_per_business",
+            ),
+            models.CheckConstraint(
+                condition=Q(
+                    opening_balance__gte=0,
+                ),
+                name=(
+                    "cash_register_"
+                    "opening_balance_gte_0"
+                ),
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(closing_balance__isnull=True)
+                    | Q(closing_balance__gte=0)
+                ),
+                name=(
+                    "cash_register_"
+                    "closing_balance_gte_0"
+                ),
+            ),
+        ]
+
+        ordering = [
+            "-open_time",
+        ]
+
+    def clean(self):
+        super().clean()
+
+        if (
+            self.employee_id
+            and self.business_id
+            and self.employee.business_id
+            != self.business_id
+        ):
+            raise ValidationError({
+                "employee": (
+                    "El empleado debe pertenecer al mismo "
+                    "negocio de la caja."
+                )
+            })
+
+        if (
+            self.close_time is not None
+            and self.open_time is not None
+            and self.close_time < self.open_time
+        ):
+            raise ValidationError({
+                "close_time": (
+                    "La fecha de cierre no puede ser "
+                    "anterior a la apertura."
+                )
+            })
+
+        if self.status == self.STATUS_CLOSED:
+            required_fields = {
+                "close_time": self.close_time,
+                "closing_balance": self.closing_balance,
+                "expected_closing_balance": (
+                    self.expected_closing_balance
+                ),
+                "difference": self.difference,
+                "closed_by": self.closed_by,
+            }
+
+            missing_fields = [
+                field
+                for field, value in required_fields.items()
+                if value is None
+            ]
+
+            if missing_fields:
+                raise ValidationError({
+                    "status": (
+                        "Una caja cerrada debe contener "
+                        "todos los datos del cierre."
+                    )
+                })
+
+    def __str__(self):
+        return (
+            f"{self.business.business_name} · "
+            f"{self.employee.full_name} · "
+            f"{self.status}"
+        )
+
+
+class CashMovement(models.Model):
+    TYPE_DEPOSIT = "deposit"
+    TYPE_WITHDRAWAL = "withdrawal"
+    TYPE_EMPLOYEE_ADVANCE = "employee_advance"
+    TYPE_EMPLOYEE_REPAYMENT = "employee_repayment"
+    TYPE_OTHER_INCOME = "other_income"
+    TYPE_OTHER_EXPENSE = "other_expense"
+
+    MOVEMENT_TYPES = [
+        (TYPE_DEPOSIT, "Depósito en caja"),
+        (TYPE_WITHDRAWAL, "Retiro de caja"),
+        (
+            TYPE_EMPLOYEE_ADVANCE,
+            "Adelanto a empleado",
+        ),
+        (
+            TYPE_EMPLOYEE_REPAYMENT,
+            "Devolución de adelanto",
+        ),
+        (TYPE_OTHER_INCOME, "Otro ingreso"),
+        (TYPE_OTHER_EXPENSE, "Otro egreso"),
+    ]
+
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        db_index=True,
+        editable=False,
+    )
+
+    cash_register = models.ForeignKey(
+        CashRegister,
+        on_delete=models.PROTECT,
+        related_name="movements",
+    )
+
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="cash_movements",
+    )
+
+    payment_method = models.ForeignKey(
+        PaymentMethod,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="cash_movements",
+    )
+
+    movement_type = models.CharField(
+        max_length=30,
+        choices=MOVEMENT_TYPES,
+    )
+
+    amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+    )
+
+    note = models.CharField(
+        max_length=255,
+        blank=True,
+    )
+
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name="created_cash_movements",
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(amount__gt=0),
+                name="cash_movement_amount_gt_0",
+            ),
+        ]
+
+        indexes = [
+            models.Index(
+                fields=[
+                    "cash_register",
+                    "created_at",
+                ],
+                name="cashmov_register_date_idx",
+            ),
+            models.Index(
+                fields=[
+                    "employee",
+                    "created_at",
+                ],
+                name="cashmov_employee_date_idx",
+            ),
+            models.Index(
+                fields=[
+                    "movement_type",
+                    "created_at",
+                ],
+                name="cashmov_type_date_idx",
+            ),
+        ]
+
+        ordering = [
+            "-created_at",
+        ]
+
+    def clean(self):
+        super().clean()
+
+        register = (
+            self.cash_register
+            if self.cash_register_id
+            else None
+        )
+
+        if (
+            register is not None
+            and register.status
+            != CashRegister.STATUS_OPEN
+        ):
+            raise ValidationError({
+                "cash_register": (
+                    "No se pueden registrar movimientos "
+                    "en una caja cerrada."
+                )
+            })
+
+        if (
+            self.employee_id
+            and register is not None
+            and self.employee.business_id
+            != register.business_id
+        ):
+            raise ValidationError({
+                "employee": (
+                    "El empleado debe pertenecer al mismo "
+                    "negocio de la caja."
+                )
+            })
+
+        if (
+            self.payment_method_id
+            and register is not None
+            and self.payment_method.business_id
+            != register.business_id
+        ):
+            raise ValidationError({
+                "payment_method": (
+                    "El método de pago debe pertenecer al "
+                    "mismo negocio de la caja."
+                )
+            })
+
+        employee_required_types = {
+            self.TYPE_EMPLOYEE_ADVANCE,
+            self.TYPE_EMPLOYEE_REPAYMENT,
+        }
+
+        if (
+            self.movement_type
+            in employee_required_types
+            and self.employee_id is None
+        ):
+            raise ValidationError({
+                "employee": (
+                    "Debes indicar el empleado para "
+                    "este tipo de movimiento."
+                )
+            })
+
+    @property
+    def signed_amount(self):
+        income_types = {
+            self.TYPE_DEPOSIT,
+            self.TYPE_EMPLOYEE_REPAYMENT,
+            self.TYPE_OTHER_INCOME,
+        }
+
+        if self.movement_type in income_types:
+            return self.amount
+
+        return -self.amount
+
+    def __str__(self):
+        return (
+            f"{self.get_movement_type_display()} · "
+            f"{self.amount}"
+        )
 
 class Transaction(models.Model):
     TRANSACTION_TYPES = [
@@ -832,54 +1249,6 @@ class GoalProgress(models.Model):
     def __str__(self):
         return f"{self.amount} towards {self.goal.name}"
     
-class CashRegister(models.Model):
-    public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
-    business = models.ForeignKey('Business', on_delete=models.CASCADE, related_name='cash_registers')
-    employee = models.ForeignKey('Employee', on_delete=models.CASCADE, related_name='cash_registers')
-    open_time = models.DateTimeField()
-    close_time = models.DateTimeField(null=True, blank=True)
-    opening_balance = models.DecimalField(max_digits=12, decimal_places=2)
-    closing_balance = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
-    status = models.CharField(max_length=10, choices=[('open', 'Open'), ('closed', 'Closed')])
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["business"], condition=models.Q(status="open"),
-                                    name="one_open_register_per_business"),
-        ]
-
-    def clean(self):
-        super().clean()
-
-        if (
-            self.employee_id
-            and self.business_id
-            and self.employee.business_id != self.business_id
-        ):
-            raise ValidationError({
-                "employee": (
-                    "El empleado debe pertenecer al mismo negocio "
-                    "de la caja."
-                )
-            })
-
-        if (
-            self.close_time is not None
-            and self.open_time is not None
-            and self.close_time < self.open_time
-        ):
-            raise ValidationError({
-                "close_time": (
-                    "La fecha de cierre no puede ser anterior "
-                    "a la apertura."
-                )
-            })
-
-    def __str__(self):
-        who = f"{self.employee.full_name}" if self.employee_id else "N/A"
-        return f"{self.business.business_name} · {who} · {self.status}"
-
-
 class ActivityLog(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='activity_logs')
