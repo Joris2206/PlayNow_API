@@ -3,9 +3,26 @@ from decimal import Decimal
 from itertools import count
 
 from core.models import (
-    Business, BusinessMembership, CommissionSettlement, Customer, Debt, DebtPayment, Employee, EmployeeCommissionPlan,
-    EntityStatus, PaymentMethod, Product, ProductCategory, ProductVariant,
-    ProductVariantType, Supplier, Transaction, TransactionDetail, User,
+    Business,
+    BusinessMembership,
+    CashMovement,
+    CashRegister,
+    CommissionSettlement,
+    Customer,
+    Debt,
+    DebtPayment,
+    Employee,
+    EmployeeCommissionPlan,
+    EntityStatus,
+    PaymentMethod,
+    Product,
+    ProductCategory,
+    ProductVariant,
+    ProductVariantType,
+    Supplier,
+    Transaction,
+    TransactionDetail,
+    User,
 )
 
 _sequence = count(1)
@@ -194,30 +211,65 @@ def create_supplier(*, business, status=None, name=None):
     )
 
 
-def create_payment_method(*, business, status=None, name=None):
+def create_payment_method(
+    *,
+    business,
+    status=None,
+    name=None,
+    method_type=PaymentMethod.TYPE_OTHER,
+):
     n = next_number()
+
     return PaymentMethod.objects.create(
         business=business,
         name=name or f"Método {n}",
+        method_type=method_type,
         status=status or create_status(),
     )
 
 
-def create_transaction(*, business, created_by, status=None, employee=None, transaction_type="sale", total_value=Decimal("100.00"), is_debt=False, created_at=None):
+def create_transaction(
+    *,
+    business,
+    created_by,
+    status=None,
+    employee=None,
+    payment_method=None,
+    customer=None,
+    supplier=None,
+    transaction_type="sale",
+    total_value=Decimal("100.00"),
+    is_debt=False,
+    created_at=None,
+):
     tx = Transaction.objects.create(
         business=business,
         employee=employee,
+        customer=customer,
+        supplier=supplier,
+        payment_method=payment_method,
         type=transaction_type,
         is_debt=is_debt,
         concept="Transacción de prueba",
         total_value=total_value,
         status=status or create_status(),
-        payment_status="pending" if is_debt else "paid",
+        payment_status=(
+            "pending"
+            if is_debt
+            else "paid"
+        ),
         created_by=created_by,
     )
+
     if created_at is not None:
-        Transaction.objects.filter(pk=tx.pk).update(created_at=created_at)
+        Transaction.objects.filter(
+            pk=tx.pk
+        ).update(
+            created_at=created_at
+        )
+
         tx.refresh_from_db()
+
     return tx
 
 
@@ -281,34 +333,98 @@ def create_commission_settlement(
     period_start: date,
     period_end: date,
     sales_count: int = 1,
-    sales_total: Decimal = Decimal(
-        "1000.00"
-    ),
-    commission_percentage: Decimal = (
-        Decimal("5.00")
-    ),
-    commission_total: Decimal = (
-        Decimal("50.00")
-    ),
+    sales_total: Decimal = Decimal("1000.00"),
+    commission_percentage: Decimal = Decimal("5.00"),
+    commission_total: Decimal = Decimal("50.00"),
+    employee_advances: Decimal = Decimal("0.00"),
+    employee_repayments: Decimal = Decimal("0.00"),
+    advance_balance: Decimal = Decimal("0.00"),
+    net_commission_payable: Decimal | None = None,
+    remaining_advance_balance: Decimal = Decimal("0.00"),
     settlement_status: str = (
         CommissionSettlement.STATUS_PENDING
     ),
 ) -> CommissionSettlement:
-    return (
-        CommissionSettlement.objects
-        .create(
-            employee=employee,
-            period_start=period_start,
-            period_end=period_end,
-            sales_count=sales_count,
-            sales_total=sales_total,
-            commission_percentage=(
-                commission_percentage
-            ),
-            commission_total=(
-                commission_total
-            ),
-            status=settlement_status,
-            created_by=created_by,
-        )
+    net_payable = (
+        net_commission_payable
+        if net_commission_payable is not None
+        else commission_total
+    )
+
+    return CommissionSettlement.objects.create(
+        employee=employee,
+        period_start=period_start,
+        period_end=period_end,
+        sales_count=sales_count,
+        sales_total=sales_total,
+        commission_percentage=commission_percentage,
+        commission_total=commission_total,
+        employee_advances=employee_advances,
+        employee_repayments=employee_repayments,
+        advance_balance=advance_balance,
+        net_commission_payable=net_payable,
+        remaining_advance_balance=(
+            remaining_advance_balance
+        ),
+        status=settlement_status,
+        created_by=created_by,
+    )
+
+def create_cash_register(
+    *,
+    business,
+    employee,
+    opened_by,
+    opening_balance=Decimal("1000.00"),
+    register_status=CashRegister.STATUS_OPEN,
+    open_time=None,
+    closing_balance=None,
+    expected_closing_balance=None,
+    difference=None,
+    closed_by=None,
+    close_time=None,
+    opening_notes="",
+    closing_notes="",
+):
+    from django.utils import timezone
+
+    return CashRegister.objects.create(
+        business=business,
+        employee=employee,
+        opened_by=opened_by,
+        closed_by=closed_by,
+        open_time=(
+            open_time
+            or timezone.now()
+        ),
+        close_time=close_time,
+        opening_balance=opening_balance,
+        closing_balance=closing_balance,
+        expected_closing_balance=(
+            expected_closing_balance
+        ),
+        difference=difference,
+        opening_notes=opening_notes,
+        closing_notes=closing_notes,
+        status=register_status,
+    )
+
+def create_cash_movement(
+    *,
+    cash_register,
+    created_by,
+    movement_type=CashMovement.TYPE_DEPOSIT,
+    amount=Decimal("100.00"),
+    employee=None,
+    payment_method=None,
+    note="Movimiento de prueba",
+):
+    return CashMovement.objects.create(
+        cash_register=cash_register,
+        employee=employee,
+        payment_method=payment_method,
+        movement_type=movement_type,
+        amount=amount,
+        note=note,
+        created_by=created_by,
     )

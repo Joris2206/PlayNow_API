@@ -1526,6 +1526,36 @@ class CommissionSettlement(models.Model):
         decimal_places=2,
     )
 
+    employee_advances = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+    )
+
+    employee_repayments = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+    )
+
+    advance_balance = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+    )
+
+    net_commission_payable = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+    )
+
+    remaining_advance_balance = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+    )
+
     status = models.CharField(
         max_length=20,
         choices=STATUSES,
@@ -1563,6 +1593,26 @@ class CommissionSettlement(models.Model):
                     "unique_employee_commission_"
                     "settlement_per_period"
                 ),
+            ),
+            models.CheckConstraint(
+                condition=Q(employee_advances__gte=0),
+                name="commission_employee_advances_gte_0",
+            ),
+            models.CheckConstraint(
+                condition=Q(employee_repayments__gte=0),
+                name="commission_employee_repayments_gte_0",
+            ),
+            models.CheckConstraint(
+                condition=Q(advance_balance__gte=0),
+                name="commission_advance_balance_gte_0",
+            ),
+            models.CheckConstraint(
+                condition=Q(net_commission_payable__gte=0),
+                name="commission_net_payable_gte_0",
+            ),
+            models.CheckConstraint(
+                condition=Q(remaining_advance_balance__gte=0),
+                name="commission_remaining_advance_gte_0",
             ),
         ]
 

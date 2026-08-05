@@ -15,7 +15,7 @@ from .mixins import SoftDeleteByStatusMixin
 from django.db import transaction as db_tx
 from django.db.models import (Avg, Count, Q, Sum)
 from collections import defaultdict
-from core.utils import log_action
+from core.utils import calculate_employee_advance_summary, log_action
 from rest_framework.throttling import ScopedRateThrottle
 from .serializers import (
     BusinessMembershipSerializer,
@@ -26,6 +26,13 @@ from .serializers import (
     CashRegisterSerializer,
     EmployeeAccessCreateSerializer,
     HealthSerializer,
+    MonthlySummaryQuerySerializer,
+)
+from datetime import (
+    date,
+    datetime,
+    time,
+    timedelta,
 )
 from .services.serializer import ChangePasswordSerializer, PasswordResetRequestSerializer, PasswordResetConfirmSerializer
 from django.conf import settings
@@ -623,6 +630,71 @@ def calculate_cash_register_summary(
             expected_closing_balance
         ),
     }
+
+def get_month_period(
+    *,
+    year: int,
+    month: int,
+):
+    period_start_date = date(
+        year,
+        month,
+        1,
+    )
+
+    if month == 12:
+        next_month_date = date(
+            year + 1,
+            1,
+            1,
+        )
+    else:
+        next_month_date = date(
+            year,
+            month + 1,
+            1,
+        )
+
+    current_timezone = (
+        django_timezone.get_current_timezone()
+    )
+
+    period_start = (
+        django_timezone.make_aware(
+            datetime.combine(
+                period_start_date,
+                time.min,
+            ),
+            current_timezone,
+        )
+    )
+
+    period_end = (
+        django_timezone.make_aware(
+            datetime.combine(
+                next_month_date,
+                time.min,
+            ),
+            current_timezone,
+        )
+    )
+
+    return {
+        "start_date": period_start_date,
+        "end_date": (
+            next_month_date
+            - timedelta(days=1)
+        ),
+        "start_datetime": period_start,
+        "end_datetime": period_end,
+    }
+
+def decimal_or_zero(value):
+    return (
+        value or Decimal("0.00")
+    ).quantize(
+        Decimal("0.01")
+    )
 
 # -------- Healthcheck (ya lo usaste en /api/health/) --------
 @extend_schema(
@@ -3508,47 +3580,91 @@ class EmployeeCommissionPreviewView(
             Decimal("0.01")
         )
 
+        advance_summary = (
+            calculate_employee_advance_summary(
+                employee=employee,
+                period_start=date_from,
+                period_end=date_to,
+            )
+        )
+
+        employee_advances = advance_summary[
+            "employee_advances"
+        ]
+
+        employee_repayments = advance_summary[
+            "employee_repayments"
+        ]
+
+        advance_balance = advance_summary[
+            "advance_balance"
+        ]
+
+        net_commission_payable = max(
+            commission_total - advance_balance,
+            Decimal("0.00"),
+        ).quantize(
+            Decimal("0.01")
+        )
+
+        remaining_advance_balance = max(
+            advance_balance - commission_total,
+            Decimal("0.00"),
+        ).quantize(
+            Decimal("0.01")
+        )
+
         return Response({
             "business": {
                 "public_id": str(
                     business.public_id
                 ),
-                "name": (
-                    business.business_name
-                ),
+                "name": business.business_name,
                 "currency": business.currency,
             },
             "employee": {
                 "public_id": str(
                     employee.public_id
                 ),
-                "full_name": (
-                    employee.full_name
-                ),
+                "full_name": employee.full_name,
             },
             "period": {
                 "date_from": date_from,
                 "date_to": date_to,
             },
-            "sales_count": (
-                summary["sales_count"]
-            ),
+            "sales_count": summary["sales_count"],
             "sales_total": str(
                 sales_total.quantize(
                     Decimal("0.01")
                 )
             ),
             "commission_percentage": str(
-                percentage
+                percentage.quantize(
+                    Decimal("0.01")
+                )
             ),
             "commission_total": str(
                 commission_total
+            ),
+            "employee_advances": str(
+                employee_advances
+            ),
+            "employee_repayments": str(
+                employee_repayments
+            ),
+            "advance_balance": str(
+                advance_balance
+            ),
+            "net_commission_payable": str(
+                net_commission_payable
+            ),
+            "remaining_advance_balance": str(
+                remaining_advance_balance
             ),
             "commission_plan": str(
                 commission_plan.public_id
             ),
         })
-
 @extend_schema_view(
     list=extend_schema(
         tags=["Commissions"],
@@ -4095,12 +4211,6 @@ class CashRegisterViewSet(
         cash_register = (
             CashRegister.objects
             .select_for_update()
-            .select_related(
-                "business",
-                "employee",
-                "opened_by",
-                "closed_by",
-            )
             .get(
                 public_id=public_id
             )
@@ -4389,4 +4499,575 @@ class CashMovementViewSet(
                     movement.amount
                 ),
             },
+        )
+
+class MonthlySummaryView(
+    APIView
+):
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    @extend_schema(
+        tags=["Reports"],
+        summary="Resumen mensual del negocio",
+        description=(
+            "Calcula el resumen operativo y financiero "
+            "de un negocio durante un mes. "
+            "El resultado es dinámico y no representa "
+            "todavía un cierre mensual definitivo."
+        ),
+        parameters=[
+            MonthlySummaryQuerySerializer,
+        ],
+        responses={
+            200: OpenApiResponse(
+                description=(
+                    "Resumen mensual calculado."
+                )
+            ),
+        },
+    )
+    def get(
+        self,
+        request,
+    ):
+        query_serializer = (
+            MonthlySummaryQuerySerializer(
+                data=request.query_params
+            )
+        )
+
+        query_serializer.is_valid(
+            raise_exception=True
+        )
+
+        business_public_id = (
+            query_serializer.validated_data[
+                "business_public_id"
+            ]
+        )
+
+        year = (
+            query_serializer.validated_data[
+                "year"
+            ]
+        )
+
+        month = (
+            query_serializer.validated_data[
+                "month"
+            ]
+        )
+
+        business = get_object_or_404(
+            Business,
+            public_id=business_public_id,
+        )
+
+        validate_report_business_access(
+            user=request.user,
+            business=business,
+        )
+
+        period = get_month_period(
+            year=year,
+            month=month,
+        )
+
+        period_start = period[
+            "start_datetime"
+        ]
+
+        period_end = period[
+            "end_datetime"
+        ]
+
+        start_date = period[
+            "start_date"
+        ]
+
+        end_date = period[
+            "end_date"
+        ]
+
+        excluded_status_names = [
+            "Eliminado",
+            "Anulado",
+            "Cancelado",
+            "Void",
+            "Deleted",
+        ]
+
+        base_transactions = (
+            Transaction.objects
+            .filter(
+                business=business,
+                created_at__gte=period_start,
+                created_at__lt=period_end,
+            )
+            .exclude(
+                status__name__in=(
+                    excluded_status_names
+                )
+            )
+        )
+
+        def transaction_summary(
+            transaction_type,
+        ):
+            result = (
+                base_transactions
+                .filter(
+                    type=transaction_type
+                )
+                .aggregate(
+                    count=Count("id"),
+                    total=Sum("total_value"),
+                )
+            )
+
+            return {
+                "count": result["count"],
+                "total": decimal_or_zero(
+                    result["total"]
+                ),
+            }
+
+        sales = transaction_summary(
+            "sale"
+        )
+
+        purchases = transaction_summary(
+            "purchase"
+        )
+
+        expenses = transaction_summary(
+            "expense"
+        )
+
+        paid_sales = (
+            base_transactions
+            .filter(
+                type="sale",
+                payment_status="paid",
+            )
+            .aggregate(
+                count=Count("id"),
+                total=Sum("total_value"),
+            )
+        )
+
+        debt_sales = (
+            base_transactions
+            .filter(
+                type="sale",
+                is_debt=True,
+                payment_status__in=[
+                    "pending",
+                    "partial",
+                ],
+            )
+            .aggregate(
+                count=Count("id"),
+                total=Sum("total_value"),
+            )
+        )
+
+        debt_generated = (
+            Debt.objects
+            .filter(
+                transaction__business=business,
+                transaction__created_at__gte=(
+                    period_start
+                ),
+                transaction__created_at__lt=(
+                    period_end
+                ),
+            )
+            .exclude(
+                transaction__status__name__in=(
+                    excluded_status_names
+                )
+            )
+            .aggregate(
+                count=Count("id"),
+                total=Sum("total_amount"),
+            )
+        )
+
+        debt_payments = (
+            DebtPayment.objects
+            .filter(
+                debt__transaction__business=business,
+                payment_date__gte=start_date,
+                payment_date__lte=end_date,
+            )
+            .aggregate(
+                count=Count("id"),
+                total=Sum("amount"),
+            )
+        )
+
+        outstanding_debt = (
+            Debt.objects
+            .filter(
+                transaction__business=business,
+                transaction__created_at__lt=(
+                    period_end
+                ),
+                is_settled=False,
+            )
+            .exclude(
+                transaction__status__name__in=(
+                    excluded_status_names
+                )
+            )
+            .aggregate(
+                total=Sum("total_amount"),
+                paid=Sum("paid_amount"),
+            )
+        )
+
+        outstanding_total = (
+            decimal_or_zero(
+                outstanding_debt["total"]
+            )
+            - decimal_or_zero(
+                outstanding_debt["paid"]
+            )
+        ).quantize(
+            Decimal("0.01")
+        )
+
+        closed_registers = (
+            CashRegister.objects
+            .filter(
+                business=business,
+                status=CashRegister.STATUS_CLOSED,
+                close_time__gte=period_start,
+                close_time__lt=period_end,
+            )
+        )
+
+        cash_summary = (
+            closed_registers.aggregate(
+                registers_count=Count("id"),
+                opening_total=Sum(
+                    "opening_balance"
+                ),
+                expected_total=Sum(
+                    "expected_closing_balance"
+                ),
+                counted_total=Sum(
+                    "closing_balance"
+                ),
+                difference_total=Sum(
+                    "difference"
+                ),
+            )
+        )
+
+        shortages = (
+            closed_registers
+            .filter(
+                difference__lt=0
+            )
+            .aggregate(
+                total=Sum("difference")
+            )
+        )
+
+        surpluses = (
+            closed_registers
+            .filter(
+                difference__gt=0
+            )
+            .aggregate(
+                total=Sum("difference")
+            )
+        )
+
+        commission_settlements = (
+            CommissionSettlement.objects
+            .filter(
+                employee__business=business,
+                period_start__gte=start_date,
+                period_end__lte=end_date,
+            )
+        )
+
+        commission_summary = (
+            commission_settlements
+            .aggregate(
+                settlements_count=Count("id"),
+                sales_total=Sum(
+                    "sales_total"
+                ),
+                commission_total=Sum(
+                    "commission_total"
+                ),
+                employee_advances=Sum(
+                    "employee_advances"
+                ),
+                employee_repayments=Sum(
+                    "employee_repayments"
+                ),
+                advance_balance=Sum(
+                    "advance_balance"
+                ),
+                net_commission_payable=Sum(
+                    "net_commission_payable"
+                ),
+                remaining_advance_balance=Sum(
+                    "remaining_advance_balance"
+                ),
+            )
+        )
+
+        paid_commissions = (
+            commission_settlements
+            .filter(
+                status=(
+                    CommissionSettlement
+                    .STATUS_PAID
+                )
+            )
+            .aggregate(
+                count=Count("id"),
+                total=Sum(
+                    "net_commission_payable"
+                ),
+            )
+        )
+
+        pending_commissions = (
+            commission_settlements
+            .filter(
+                status=(
+                    CommissionSettlement
+                    .STATUS_PENDING
+                )
+            )
+            .aggregate(
+                count=Count("id"),
+                total=Sum(
+                    "net_commission_payable"
+                ),
+            )
+        )
+
+        return Response(
+            {
+                "business": {
+                    "public_id": str(
+                        business.public_id
+                    ),
+                    "name": (
+                        business.business_name
+                    ),
+                    "currency": business.currency,
+                },
+                "period": {
+                    "year": year,
+                    "month": month,
+                    "date_from": start_date,
+                    "date_to": end_date,
+                },
+                "transactions": {
+                    "sales": {
+                        "count": sales["count"],
+                        "total": str(
+                            sales["total"]
+                        ),
+                        "paid_count": (
+                            paid_sales["count"]
+                        ),
+                        "paid_total": str(
+                            decimal_or_zero(
+                                paid_sales["total"]
+                            )
+                        ),
+                        "debt_count": (
+                            debt_sales["count"]
+                        ),
+                        "debt_total": str(
+                            decimal_or_zero(
+                                debt_sales["total"]
+                            )
+                        ),
+                    },
+                    "purchases": {
+                        "count": (
+                            purchases["count"]
+                        ),
+                        "total": str(
+                            purchases["total"]
+                        ),
+                    },
+                    "expenses": {
+                        "count": (
+                            expenses["count"]
+                        ),
+                        "total": str(
+                            expenses["total"]
+                        ),
+                    },
+                },
+                "debts": {
+                    "generated_count": (
+                        debt_generated["count"]
+                    ),
+                    "generated_total": str(
+                        decimal_or_zero(
+                            debt_generated[
+                                "total"
+                            ]
+                        )
+                    ),
+                    "payments_count": (
+                        debt_payments["count"]
+                    ),
+                    "payments_total": str(
+                        decimal_or_zero(
+                            debt_payments[
+                                "total"
+                            ]
+                        )
+                    ),
+                    "outstanding_at_period_end": str(
+                        outstanding_total
+                    ),
+                },
+                "cash_registers": {
+                    "closed_count": (
+                        cash_summary[
+                            "registers_count"
+                        ]
+                    ),
+                    "opening_total": str(
+                        decimal_or_zero(
+                            cash_summary[
+                                "opening_total"
+                            ]
+                        )
+                    ),
+                    "expected_total": str(
+                        decimal_or_zero(
+                            cash_summary[
+                                "expected_total"
+                            ]
+                        )
+                    ),
+                    "counted_total": str(
+                        decimal_or_zero(
+                            cash_summary[
+                                "counted_total"
+                            ]
+                        )
+                    ),
+                    "difference_total": str(
+                        decimal_or_zero(
+                            cash_summary[
+                                "difference_total"
+                            ]
+                        )
+                    ),
+                    "shortages_total": str(
+                        decimal_or_zero(
+                            shortages["total"]
+                        )
+                    ),
+                    "surpluses_total": str(
+                        decimal_or_zero(
+                            surpluses["total"]
+                        )
+                    ),
+                },
+                "commissions": {
+                    "settlements_count": (
+                        commission_summary[
+                            "settlements_count"
+                        ]
+                    ),
+                    "settled_sales_total": str(
+                        decimal_or_zero(
+                            commission_summary[
+                                "sales_total"
+                            ]
+                        )
+                    ),
+                    "gross_commission_total": str(
+                        decimal_or_zero(
+                            commission_summary[
+                                "commission_total"
+                            ]
+                        )
+                    ),
+                    "employee_advances": str(
+                        decimal_or_zero(
+                            commission_summary[
+                                "employee_advances"
+                            ]
+                        )
+                    ),
+                    "employee_repayments": str(
+                        decimal_or_zero(
+                            commission_summary[
+                                "employee_repayments"
+                            ]
+                        )
+                    ),
+                    "advance_balance": str(
+                        decimal_or_zero(
+                            commission_summary[
+                                "advance_balance"
+                            ]
+                        )
+                    ),
+                    "net_commission_payable": str(
+                        decimal_or_zero(
+                            commission_summary[
+                                "net_commission_payable"
+                            ]
+                        )
+                    ),
+                    "remaining_advance_balance": str(
+                        decimal_or_zero(
+                            commission_summary[
+                                "remaining_advance_balance"
+                            ]
+                        )
+                    ),
+                    "paid": {
+                        "count": (
+                            paid_commissions[
+                                "count"
+                            ]
+                        ),
+                        "total": str(
+                            decimal_or_zero(
+                                paid_commissions[
+                                    "total"
+                                ]
+                            )
+                        ),
+                    },
+                    "pending": {
+                        "count": (
+                            pending_commissions[
+                                "count"
+                            ]
+                        ),
+                        "total": str(
+                            decimal_or_zero(
+                                pending_commissions[
+                                    "total"
+                                ]
+                            )
+                        ),
+                    },
+                },
+            },
+            status=status.HTTP_200_OK,
         )

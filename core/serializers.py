@@ -4,6 +4,8 @@ from django.db import transaction as db_tx
 from django.db.models import Sum, Q
 from django.utils import timezone
 from rest_framework import serializers
+
+from core.utils import calculate_employee_advance_summary
 from .models import (
     BusinessMembership, User, Business, EntityStatus,
     ProductCategory, Product, ProductVariantType, ProductVariant,
@@ -2014,6 +2016,11 @@ class CommissionSettlementSerializer(
             "sales_total",
             "commission_percentage",
             "commission_total",
+            "employee_advances",
+            "employee_repayments",
+            "advance_balance",
+            "net_commission_payable",
+            "remaining_advance_balance",
             "status",
             "paid_at",
             "created_by",
@@ -2170,28 +2177,73 @@ class CommissionSettlementCreateSerializer(
             Decimal("0.01")
         )
 
-        return (
-            CommissionSettlement.objects
-            .create(
+        advance_summary = (
+            calculate_employee_advance_summary(
                 employee=employee,
                 period_start=period_start,
                 period_end=period_end,
-                sales_count=sales_count,
-                sales_total=sales_total,
-                commission_percentage=(
-                    commission_percentage
-                ),
-                commission_total=(
-                    commission_total
-                ),
-                status=(
-                    CommissionSettlement
-                    .STATUS_PENDING
-                ),
-                created_by=request.user,
             )
         )
 
+        employee_advances = advance_summary[
+            "employee_advances"
+        ]
+
+        employee_repayments = advance_summary[
+            "employee_repayments"
+        ]
+
+        advance_balance = advance_summary[
+            "advance_balance"
+        ]
+
+        net_commission_payable = max(
+            commission_total - advance_balance,
+            Decimal("0.00"),
+        ).quantize(
+            Decimal("0.01")
+        )
+
+        remaining_advance_balance = max(
+            advance_balance - commission_total,
+            Decimal("0.00"),
+        ).quantize(
+            Decimal("0.01")
+        )
+
+        return CommissionSettlement.objects.create(
+            employee=employee,
+            period_start=period_start,
+            period_end=period_end,
+            sales_count=sales_count,
+            sales_total=sales_total,
+            commission_percentage=(
+                commission_percentage
+            ),
+            commission_total=(
+                commission_total
+            ),
+            employee_advances=(
+                employee_advances
+            ),
+            employee_repayments=(
+                employee_repayments
+            ),
+            advance_balance=(
+                advance_balance
+            ),
+            net_commission_payable=(
+                net_commission_payable
+            ),
+            remaining_advance_balance=(
+                remaining_advance_balance
+            ),
+            status=(
+                CommissionSettlement.STATUS_PENDING
+            ),
+            created_by=request.user,
+        )
+        
 class CashRegisterSerializer(
     serializers.ModelSerializer
 ):
@@ -2563,6 +2615,21 @@ class CashMovementSerializer(
             })
 
         return attrs
+
+class MonthlySummaryQuerySerializer(
+    serializers.Serializer
+):
+    business_public_id = serializers.UUIDField()
+
+    year = serializers.IntegerField(
+        min_value=2000,
+        max_value=2100,
+    )
+
+    month = serializers.IntegerField(
+        min_value=1,
+        max_value=12,
+    )
 
 # ---------- Lecturas (solo por si las quieres exponer) ----------
 class StockMovementSerializer(serializers.ModelSerializer):

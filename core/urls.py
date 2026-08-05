@@ -10,7 +10,7 @@ from .views import (
     BudgetViewSet, GoalViewSet, GoalProgressViewSet,
     StockMovementViewSet, UserViewSet, PasswordResetRequestView, PasswordResetConfirmView,
     EmployeeCommissionPlanViewSet, EmployeeCommissionPreviewView, EmployeeSalesReportView,
-    CashMovementViewSet, CashRegisterViewSet
+    CashMovementViewSet, CashRegisterViewSet, MonthlySummaryView
 )
 
 router = DefaultRouter()
@@ -63,11 +63,14 @@ router.register(r"commission-settlements", CommissionSettlementViewSet, basename
 router.register(r'cash-movements', CashMovementViewSet, basename='cash-movement')
 router.register(r'cash-registers', CashRegisterViewSet, basename='cash-register')
 
+#Cierres mensuales
+
 urlpatterns = [
     path("reports/employee-sales/", EmployeeSalesReportView.as_view(), name="employee-sales-report"),
     path("reports/employee-commission/", EmployeeCommissionPreviewView.as_view(), name="employee-commission-preview"),
     path("auth/password/reset/", PasswordResetRequestView.as_view(), name="password-reset-request"),
     path("auth/password/reset/confirm/", PasswordResetConfirmView.as_view(), name="password-reset-confirm"),
+    path("reports/monthly-summary/", MonthlySummaryView.as_view(), name="monthly-summary"),
     path('health/', healthcheck, name='healthcheck'),
     path('', include(router.urls)),
 ]
