@@ -530,8 +530,6 @@ class CashRegister(models.Model):
     opened_by = models.ForeignKey(
         User,
         on_delete=models.PROTECT,
-        null=True,
-        blank=True,
         related_name="opened_cash_registers",
     )
 
@@ -978,7 +976,6 @@ class Transaction(models.Model):
             inv = f" #{self.invoice_series}-{self.invoice_number}".replace("# -", "").replace("--", "-").strip()
         return f"{t}{inv} · {self.public_id}"
 
-
 class TransactionDetail(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     transaction = models.ForeignKey(Transaction, on_delete=models.CASCADE, related_name='details')
@@ -1143,7 +1140,6 @@ class Debt(models.Model):
         ratio = f"{self.paid_amount}/{self.total_amount}"
         return f"Debt {self.public_id} · Tx {self.transaction.public_id} · {ratio}"
 
-
 class DebtPayment(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     debt = models.ForeignKey('Debt', on_delete=models.CASCADE, related_name='payments')
@@ -1285,7 +1281,7 @@ class ActivityLog(models.Model):
 
 class StockMovement(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
-    product = models.ForeignKey('Product', on_delete=models.CASCADE, related_name='stock_movements')
+    product = models.ForeignKey('Product', on_delete=models.PROTECT, related_name='stock_movements')
     variant = models.ForeignKey('ProductVariant', on_delete=models.SET_NULL, null=True, blank=True, related_name='stock_movements')
     transaction = models.ForeignKey('Transaction', on_delete=models.SET_NULL, null=True, blank=True, related_name='stock_movements')
     note = models.CharField(max_length=255, blank=True)
@@ -1320,104 +1316,6 @@ class StockMovement(models.Model):
             var = f" · {self.variant.variant_type.name}: {self.variant.label}"
         return f"{self.type} {qty} · {self.product.title}{var}"
     
-class SalesSummary(models.Model):
-    public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
-    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='sales_summaries')
-    period_start = models.DateField()
-    period_end = models.DateField()
-    total_sales = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    total_purchases = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    total_expenses = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-
-    def __str__(self):
-        rng = f"{self.period_start}→{self.period_end}"
-        return f"{self.business.business_name} · {rng}"
-
-
-class SuppliersSummary(models.Model):
-    public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
-    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='suppliers_summaries')
-    supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE, related_name='suppliers_summaries')
-    period_start = models.DateField()
-    period_end = models.DateField()
-    total_transactions = models.IntegerField(default=0)
-    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        rng = f"{self.period_start}→{self.period_end}"
-        return f"{self.business.business_name} · {self.supplier.name} · {rng}"
-
-class CustomersSummary(models.Model):
-    public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
-    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='customers_summaries')
-    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='customers_summaries')
-    period_start = models.DateField()
-    period_end = models.DateField()
-    total_transactions = models.IntegerField(default=0)
-    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        rng = f"{self.period_start}→{self.period_end}"
-        return f"{self.business.business_name} · {self.customer.full_name} · {rng}"
-
-
-class PaymentsSummary(models.Model):
-    public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
-    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='payments_summaries')
-    period_start = models.DateField()
-    period_end = models.DateField()
-    total_payments = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    total_debt_payments = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    total_cash_payments = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    total_card_payments = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        rng = f"{self.period_start}→{self.period_end}"
-        return f"{self.business.business_name} · {rng} · payments {self.total_payments}"
-
-class DebtsSummary(models.Model):
-    public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
-    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='debts_summaries')
-    period_start = models.DateField()
-    period_end = models.DateField()
-    total_debt_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    total_paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    total_pending_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        rng = f"{self.period_start}→{self.period_end}"
-        return f"{self.business.business_name} · {rng} · pending {self.total_pending_amount}"
-
-class InventorySummary(models.Model):
-    public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
-    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='inventory_summaries')
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='inventory_summaries')
-    variant = models.ForeignKey(ProductVariant, on_delete=models.SET_NULL, null=True, blank=True, related_name='inventory_summaries')
-    period_start = models.DateField()
-    period_end = models.DateField()
-    opening_stock = models.IntegerField(default=0)
-    stock_in = models.IntegerField(default=0)
-    stock_out = models.IntegerField(default=0)
-    adjustments = models.IntegerField(default=0)
-    closing_stock = models.IntegerField(default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        rng = f"{self.period_start}→{self.period_end}"
-        var = ""
-        if self.variant_id:
-            var = f" [{self.variant.variant_type.name}: {self.variant.label}]"
-        return f"{self.business.business_name} · {self.product.title}{var} · {rng}"
-
 class EmployeeCommissionPlan(models.Model):
     public_id = models.UUIDField(
         default=uuid.uuid4,
@@ -1620,4 +1518,207 @@ class CommissionSettlement(models.Model):
         return (
             f"{self.employee.full_name} · "
             f"{self.period_start} - {self.period_end}"
+        )
+
+class MonthlyClosure(models.Model):
+    STATUS_CLOSED = "closed"
+    STATUS_REOPENED = "reopened"
+
+    STATUS_CHOICES = [
+        (
+            STATUS_CLOSED,
+            "Cerrado",
+        ),
+        (
+            STATUS_REOPENED,
+            "Reabierto",
+        ),
+    ]
+
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        db_index=True,
+        editable=False,
+    )
+
+    business = models.ForeignKey(
+        "Business",
+        on_delete=models.PROTECT,
+        related_name="monthly_closures",
+    )
+
+    year = models.PositiveSmallIntegerField()
+
+    month = models.PositiveSmallIntegerField()
+
+    version = models.PositiveIntegerField(
+        default=1,
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_CLOSED,
+    )
+
+    # Copia completa del Monthly Summary al momento del cierre.
+    summary = models.JSONField()
+
+    closed_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name="closed_monthly_periods",
+    )
+
+    closed_at = models.DateTimeField(
+        default=django_timezone.now,
+    )
+
+    reopened_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="reopened_monthly_periods",
+    )
+
+    reopened_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    reopen_reason = models.TextField(
+        blank=True,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "business",
+                    "year",
+                    "month",
+                    "version",
+                ],
+                name=(
+                    "unique_monthly_closure_version"
+                ),
+            ),
+            models.UniqueConstraint(
+                fields=[
+                    "business",
+                    "year",
+                    "month",
+                ],
+                condition=Q(status="closed"),
+                name=(
+                    "one_active_monthly_closure"
+                ),
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(month__gte=1)
+                    & Q(month__lte=12)
+                ),
+                name=(
+                    "monthly_closure_month_1_12"
+                ),
+            ),
+            models.CheckConstraint(
+                condition=Q(year__gte=2000),
+                name=(
+                    "monthly_closure_year_gte_2000"
+                ),
+            ),
+            models.CheckConstraint(
+                condition=Q(version__gt=0),
+                name=(
+                    "monthly_closure_version_gt_0"
+                ),
+            ),
+        ]
+
+        indexes = [
+            models.Index(
+                fields=[
+                    "business",
+                    "year",
+                    "month",
+                ],
+                name="monthclose_biz_period_idx",
+            ),
+            models.Index(
+                fields=[
+                    "business",
+                    "status",
+                ],
+                name="monthclose_biz_status_idx",
+            ),
+            models.Index(
+                fields=[
+                    "closed_at",
+                ],
+                name="monthclose_closed_at_idx",
+            ),
+        ]
+
+        ordering = [
+            "-year",
+            "-month",
+            "-version",
+        ]
+
+    def clean(self):
+        super().clean()
+
+        if self.status == self.STATUS_REOPENED:
+            errors = {}
+
+            if self.reopened_by_id is None:
+                errors["reopened_by"] = (
+                    "Debes indicar quién reabrió "
+                    "el cierre mensual."
+                )
+
+            if self.reopened_at is None:
+                errors["reopened_at"] = (
+                    "Debes indicar la fecha de "
+                    "reapertura."
+                )
+
+            if not self.reopen_reason.strip():
+                errors["reopen_reason"] = (
+                    "Debes indicar el motivo de "
+                    "la reapertura."
+                )
+
+            if errors:
+                raise ValidationError(errors)
+
+        if (
+            self.reopened_at is not None
+            and self.reopened_at < self.closed_at
+        ):
+            raise ValidationError({
+                "reopened_at": (
+                    "La reapertura no puede ser "
+                    "anterior al cierre."
+                )
+            })
+
+    def __str__(self):
+        return (
+            f"{self.business.business_name} · "
+            f"{self.year}-{self.month:02d} · "
+            f"v{self.version} · "
+            f"{self.status}"
         )

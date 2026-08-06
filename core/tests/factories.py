@@ -19,6 +19,7 @@ from core.models import (
     ProductCategory,
     ProductVariant,
     ProductVariantType,
+    StockMovement,
     Supplier,
     Transaction,
     TransactionDetail,
@@ -428,3 +429,39 @@ def create_cash_movement(
         note=note,
         created_by=created_by,
     )
+
+def create_stock_movement(
+    *,
+    product,
+    created_by,
+    movement_type,
+    quantity,
+    variant=None,
+    transaction=None,
+    transaction_detail=None,
+    note="Movimiento de inventario de prueba",
+    created_at=None,
+):
+    movement = StockMovement.objects.create(
+        product=product,
+        variant=variant,
+        transaction=transaction,
+        transaction_detail=(
+            transaction_detail
+        ),
+        note=note,
+        type=movement_type,
+        quantity=quantity,
+        created_by=created_by,
+    )
+
+    if created_at is not None:
+        StockMovement.objects.filter(
+            pk=movement.pk
+        ).update(
+            created_at=created_at
+        )
+
+        movement.refresh_from_db()
+
+    return movement

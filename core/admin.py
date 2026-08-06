@@ -25,12 +25,6 @@ from .models import (
     CashRegister,
     ActivityLog,
     StockMovement,
-    SalesSummary,
-    SuppliersSummary,
-    CustomersSummary,
-    PaymentsSummary,
-    DebtsSummary,
-    InventorySummary,
 )
 
 
@@ -994,93 +988,3 @@ class StockMovementAdmin(admin.ModelAdmin):
         return False
 
 
-# ---------------------------------------------------------------------
-# Resúmenes temporales
-# ---------------------------------------------------------------------
-
-@admin.register(SalesSummary)
-class SalesSummaryAdmin(admin.ModelAdmin):
-    list_display = (
-        "business",
-        "period_start",
-        "period_end",
-        "total_sales",
-        "total_purchases",
-        "total_expenses",
-    )
-
-    search_fields = (
-        "business__business_name",
-        "public_id",
-    )
-
-    list_filter = (
-        "business",
-        "period_start",
-        "period_end",
-    )
-
-
-@admin.register(SuppliersSummary)
-class SuppliersSummaryAdmin(admin.ModelAdmin):
-    list_display = (
-        "business",
-        "supplier",
-        "period_start",
-        "period_end",
-        "total_transactions",
-        "total_amount",
-    )
-
-
-@admin.register(CustomersSummary)
-class CustomersSummaryAdmin(admin.ModelAdmin):
-    list_display = (
-        "business",
-        "customer",
-        "period_start",
-        "period_end",
-        "total_transactions",
-        "total_amount",
-    )
-
-
-@admin.register(PaymentsSummary)
-class PaymentsSummaryAdmin(admin.ModelAdmin):
-    list_display = (
-        "business",
-        "period_start",
-        "period_end",
-        "total_payments",
-        "total_debt_payments",
-        "total_cash_payments",
-        "total_card_payments",
-    )
-
-
-@admin.register(DebtsSummary)
-class DebtsSummaryAdmin(admin.ModelAdmin):
-    list_display = (
-        "business",
-        "period_start",
-        "period_end",
-        "total_debt_amount",
-        "total_paid_amount",
-        "total_pending_amount",
-    )
-
-
-@admin.register(InventorySummary)
-class InventorySummaryAdmin(admin.ModelAdmin):
-    list_display = (
-        "business",
-        "product",
-        "variant",
-        "period_start",
-        "period_end",
-        "opening_stock",
-        "stock_in",
-        "stock_out",
-        "adjustments",
-        "closing_stock",
-    )

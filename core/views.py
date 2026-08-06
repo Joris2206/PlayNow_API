@@ -9,11 +9,17 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, PermissionDenied
 from rest_framework.generics import GenericAPIView
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiExample, OpenApiResponse
+
+from core.services.customer_supplier_reports import build_customers_summary, build_suppliers_summary
+from core.services.dashboard import build_dashboard_overview
+from core.services.inventory_report import build_inventory_summary
+from core.services.monthly_summary import build_monthly_summary
+from core.services.payment_debt_reports import build_debts_summary, build_payments_summary
 from .filters import StockMovementFilter, TransactionFilter
 from .pagination import StandardResultsSetPagination
 from .mixins import SoftDeleteByStatusMixin
 from django.db import transaction as db_tx
-from django.db.models import (Avg, Count, Q, Sum)
+from django.db.models import (Avg, Count, Q, Sum, Max)
 from collections import defaultdict
 from core.utils import calculate_employee_advance_summary, log_action
 from rest_framework.throttling import ScopedRateThrottle
@@ -24,9 +30,18 @@ from .serializers import (
     CashRegisterCloseSerializer,
     CashRegisterOpenSerializer,
     CashRegisterSerializer,
+    CustomerSummaryQuerySerializer,
+    DashboardOverviewQuerySerializer,
+    DebtSummaryQuerySerializer,
     EmployeeAccessCreateSerializer,
     HealthSerializer,
+    InventorySummaryQuerySerializer,
+    MonthlyClosureCreateSerializer,
+    MonthlyClosureReopenSerializer,
+    MonthlyClosureSerializer,
     MonthlySummaryQuerySerializer,
+    PaymentSummaryQuerySerializer,
+    SupplierSummaryQuerySerializer,
 )
 from datetime import (
     date,
@@ -368,7 +383,7 @@ GOAL_PROGRESS_CREATE_EXAMPLE = OpenApiExample(
 )
 
 from .models import (
-    BusinessMembership, CashRegister, User, Business, EntityStatus,
+    BusinessMembership, CashRegister, MonthlyClosure, User, Business, EntityStatus,
     ProductCategory, Product, ProductVariantType, ProductVariant,
     Employee, Customer, Supplier, PaymentMethod,
     Transaction, TransactionDetail, StockMovement,
@@ -392,9 +407,16 @@ def validate_report_business_access(
     *,
     user,
     business,
+    allowed_roles=None,
 ):
     if user.is_superuser:
         return
+
+    if allowed_roles is None:
+        allowed_roles = [
+            BusinessMembership.ROLE_OWNER,
+            BusinessMembership.ROLE_ADMIN,
+        ]
 
     has_access = (
         BusinessMembership.objects
@@ -402,19 +424,14 @@ def validate_report_business_access(
             user=user,
             business=business,
             is_active=True,
-            role__in=[
-                BusinessMembership.ROLE_OWNER,
-                BusinessMembership.ROLE_ADMIN,
-            ],
+            role__in=allowed_roles,
         )
         .exists()
     )
 
     if not has_access:
         raise PermissionDenied(
-            "Solo el propietario o un "
-            "administrador puede consultar "
-            "este reporte."
+            "No tienes permisos para consultar este reporte."
         )
 
 def calculate_cash_register_summary(
@@ -2331,7 +2348,7 @@ class PaymentMethodViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     list=extend_schema(tags=["Stock Movements"]),
     retrieve=extend_schema(tags=["Stock Movements"]),
 )
-class StockMovementViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
+class StockMovementViewSet(BusinessScopedViewSet):
     queryset = (
         StockMovement.objects
         .select_related("product", "product__business", "variant", "variant__variant_type", "transaction")
@@ -4513,9 +4530,7 @@ class MonthlySummaryView(
         summary="Resumen mensual del negocio",
         description=(
             "Calcula el resumen operativo y financiero "
-            "de un negocio durante un mes. "
-            "El resultado es dinámico y no representa "
-            "todavía un cierre mensual definitivo."
+            "dinámico de un negocio durante un mes."
         ),
         parameters=[
             MonthlySummaryQuerySerializer,
@@ -4542,27 +4557,14 @@ class MonthlySummaryView(
             raise_exception=True
         )
 
-        business_public_id = (
-            query_serializer.validated_data[
-                "business_public_id"
-            ]
-        )
-
-        year = (
-            query_serializer.validated_data[
-                "year"
-            ]
-        )
-
-        month = (
-            query_serializer.validated_data[
-                "month"
-            ]
-        )
-
         business = get_object_or_404(
             Business,
-            public_id=business_public_id,
+            public_id=(
+                query_serializer
+                .validated_data[
+                    "business_public_id"
+                ]
+            ),
         )
 
         validate_report_business_access(
@@ -4570,504 +4572,993 @@ class MonthlySummaryView(
             business=business,
         )
 
+        summary = build_monthly_summary(
+            business=business,
+            year=(
+                query_serializer
+                .validated_data["year"]
+            ),
+            month=(
+                query_serializer
+                .validated_data["month"]
+            ),
+        )
+
+        return Response(
+            summary,
+            status=status.HTTP_200_OK,
+        )
+    
+@extend_schema_view(
+    list=extend_schema(
+        tags=["Monthly Closures"],
+        summary="Listar cierres mensuales",
+    ),
+    retrieve=extend_schema(
+        tags=["Monthly Closures"],
+        summary="Consultar un cierre mensual",
+    ),
+    create=extend_schema(
+        tags=["Monthly Closures"],
+        summary="Cerrar un período mensual",
+        request=MonthlyClosureCreateSerializer,
+        responses={
+            201: MonthlyClosureSerializer,
+        },
+    ),
+)
+class MonthlyClosureViewSet(
+    viewsets.GenericViewSet,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+):
+    queryset = (
+        MonthlyClosure.objects
+        .select_related(
+            "business",
+            "closed_by",
+            "reopened_by",
+        )
+        .order_by(
+            "-year",
+            "-month",
+            "-version",
+        )
+    )
+
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    lookup_field = "public_id"
+    lookup_url_kwarg = "public_id"
+
+    pagination_class = (
+        StandardResultsSetPagination
+    )
+
+    filterset_fields = [
+        "business__public_id",
+        "year",
+        "month",
+        "version",
+        "status",
+    ]
+
+    ordering_fields = [
+        "year",
+        "month",
+        "version",
+        "closed_at",
+        "reopened_at",
+    ]
+
+    ordering = [
+        "-year",
+        "-month",
+        "-version",
+    ]
+
+    allowed_roles = [
+        BusinessMembership.ROLE_OWNER,
+        BusinessMembership.ROLE_ADMIN,
+    ]
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return (
+                MonthlyClosureCreateSerializer
+            )
+
+        if self.action == "reopen":
+            return (
+                MonthlyClosureReopenSerializer
+            )
+
+        return MonthlyClosureSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+
+        if user.is_superuser:
+            return queryset
+
+        return (
+            queryset
+            .filter(
+                business__memberships__user=user,
+                business__memberships__is_active=True,
+                business__memberships__role__in=(
+                    self.allowed_roles
+                ),
+            )
+            .distinct()
+        )
+
+    def _validate_management_access(
+        self,
+        business,
+    ):
+        user = self.request.user
+
+        if user.is_superuser:
+            return
+
+        has_access = (
+            BusinessMembership.objects
+            .filter(
+                user=user,
+                business=business,
+                is_active=True,
+                role__in=self.allowed_roles,
+            )
+            .exists()
+        )
+
+        if not has_access:
+            raise PermissionDenied(
+                "Solo el propietario o un "
+                "administrador puede gestionar "
+                "cierres mensuales."
+            )
+
+    def _validate_period_can_close(
+        self,
+        *,
+        business,
+        year,
+        month,
+    ):
         period = get_month_period(
             year=year,
             month=month,
         )
 
-        period_start = period[
-            "start_datetime"
-        ]
+        today = django_timezone.localdate()
 
-        period_end = period[
-            "end_datetime"
-        ]
-
-        start_date = period[
-            "start_date"
-        ]
-
-        end_date = period[
-            "end_date"
-        ]
-
-        excluded_status_names = [
-            "Eliminado",
-            "Anulado",
-            "Cancelado",
-            "Void",
-            "Deleted",
-        ]
-
-        base_transactions = (
-            Transaction.objects
-            .filter(
-                business=business,
-                created_at__gte=period_start,
-                created_at__lt=period_end,
-            )
-            .exclude(
-                status__name__in=(
-                    excluded_status_names
+        if today < period["end_date"]:
+            raise ValidationError({
+                "period": (
+                    "No se puede cerrar un mes "
+                    "que todavía no ha finalizado."
                 )
-            )
-        )
+            })
 
-        def transaction_summary(
-            transaction_type,
-        ):
-            result = (
-                base_transactions
-                .filter(
-                    type=transaction_type
-                )
-                .aggregate(
-                    count=Count("id"),
-                    total=Sum("total_value"),
-                )
-            )
-
-            return {
-                "count": result["count"],
-                "total": decimal_or_zero(
-                    result["total"]
-                ),
-            }
-
-        sales = transaction_summary(
-            "sale"
-        )
-
-        purchases = transaction_summary(
-            "purchase"
-        )
-
-        expenses = transaction_summary(
-            "expense"
-        )
-
-        paid_sales = (
-            base_transactions
-            .filter(
-                type="sale",
-                payment_status="paid",
-            )
-            .aggregate(
-                count=Count("id"),
-                total=Sum("total_value"),
-            )
-        )
-
-        debt_sales = (
-            base_transactions
-            .filter(
-                type="sale",
-                is_debt=True,
-                payment_status__in=[
-                    "pending",
-                    "partial",
-                ],
-            )
-            .aggregate(
-                count=Count("id"),
-                total=Sum("total_value"),
-            )
-        )
-
-        debt_generated = (
-            Debt.objects
-            .filter(
-                transaction__business=business,
-                transaction__created_at__gte=(
-                    period_start
-                ),
-                transaction__created_at__lt=(
-                    period_end
-                ),
-            )
-            .exclude(
-                transaction__status__name__in=(
-                    excluded_status_names
-                )
-            )
-            .aggregate(
-                count=Count("id"),
-                total=Sum("total_amount"),
-            )
-        )
-
-        debt_payments = (
-            DebtPayment.objects
-            .filter(
-                debt__transaction__business=business,
-                payment_date__gte=start_date,
-                payment_date__lte=end_date,
-            )
-            .aggregate(
-                count=Count("id"),
-                total=Sum("amount"),
-            )
-        )
-
-        outstanding_debt = (
-            Debt.objects
-            .filter(
-                transaction__business=business,
-                transaction__created_at__lt=(
-                    period_end
-                ),
-                is_settled=False,
-            )
-            .exclude(
-                transaction__status__name__in=(
-                    excluded_status_names
-                )
-            )
-            .aggregate(
-                total=Sum("total_amount"),
-                paid=Sum("paid_amount"),
-            )
-        )
-
-        outstanding_total = (
-            decimal_or_zero(
-                outstanding_debt["total"]
-            )
-            - decimal_or_zero(
-                outstanding_debt["paid"]
-            )
-        ).quantize(
-            Decimal("0.01")
-        )
-
-        closed_registers = (
+        open_register_exists = (
             CashRegister.objects
             .filter(
                 business=business,
-                status=CashRegister.STATUS_CLOSED,
-                close_time__gte=period_start,
-                close_time__lt=period_end,
-            )
-        )
-
-        cash_summary = (
-            closed_registers.aggregate(
-                registers_count=Count("id"),
-                opening_total=Sum(
-                    "opening_balance"
-                ),
-                expected_total=Sum(
-                    "expected_closing_balance"
-                ),
-                counted_total=Sum(
-                    "closing_balance"
-                ),
-                difference_total=Sum(
-                    "difference"
+                status=CashRegister.STATUS_OPEN,
+                open_time__lt=(
+                    period["end_datetime"]
                 ),
             )
+            .exists()
         )
 
-        shortages = (
-            closed_registers
+        if open_register_exists:
+            raise ValidationError({
+                "cash_register": (
+                    "Existe una caja abierta "
+                    "correspondiente al período. "
+                    "Debes cerrarla antes de "
+                    "realizar el cierre mensual."
+                )
+            })
+
+        active_closure_exists = (
+            MonthlyClosure.objects
             .filter(
-                difference__lt=0
-            )
-            .aggregate(
-                total=Sum("difference")
-            )
-        )
-
-        surpluses = (
-            closed_registers
-            .filter(
-                difference__gt=0
-            )
-            .aggregate(
-                total=Sum("difference")
-            )
-        )
-
-        commission_settlements = (
-            CommissionSettlement.objects
-            .filter(
-                employee__business=business,
-                period_start__gte=start_date,
-                period_end__lte=end_date,
-            )
-        )
-
-        commission_summary = (
-            commission_settlements
-            .aggregate(
-                settlements_count=Count("id"),
-                sales_total=Sum(
-                    "sales_total"
-                ),
-                commission_total=Sum(
-                    "commission_total"
-                ),
-                employee_advances=Sum(
-                    "employee_advances"
-                ),
-                employee_repayments=Sum(
-                    "employee_repayments"
-                ),
-                advance_balance=Sum(
-                    "advance_balance"
-                ),
-                net_commission_payable=Sum(
-                    "net_commission_payable"
-                ),
-                remaining_advance_balance=Sum(
-                    "remaining_advance_balance"
-                ),
-            )
-        )
-
-        paid_commissions = (
-            commission_settlements
-            .filter(
+                business=business,
+                year=year,
+                month=month,
                 status=(
-                    CommissionSettlement
-                    .STATUS_PAID
+                    MonthlyClosure
+                    .STATUS_CLOSED
+                ),
+            )
+            .exists()
+        )
+
+        if active_closure_exists:
+            raise ValidationError({
+                "period": (
+                    "Este período ya tiene un "
+                    "cierre mensual vigente."
+                )
+            })
+
+    @db_tx.atomic
+    def create(
+        self,
+        request,
+        *args,
+        **kwargs,
+    ):
+        serializer = self.get_serializer(
+            data=request.data
+        )
+
+        serializer.is_valid(
+            raise_exception=True
+        )
+
+        business = (
+            serializer.validated_data[
+                "business"
+            ]
+        )
+
+        year = (
+            serializer.validated_data[
+                "year"
+            ]
+        )
+
+        month = (
+            serializer.validated_data[
+                "month"
+            ]
+        )
+
+        self._validate_management_access(
+            business
+        )
+
+        # Bloquea el negocio durante el cierre
+        # para evitar dos cierres simultáneos.
+        business = (
+            Business.objects
+            .select_for_update()
+            .get(
+                pk=business.pk
+            )
+        )
+
+        self._validate_period_can_close(
+            business=business,
+            year=year,
+            month=month,
+        )
+
+        latest_version = (
+            MonthlyClosure.objects
+            .filter(
+                business=business,
+                year=year,
+                month=month,
+            )
+            .aggregate(
+                latest=Max("version")
+            )
+            .get("latest")
+            or 0
+        )
+
+        next_version = latest_version + 1
+
+        summary = build_monthly_summary(
+            business=business,
+            year=year,
+            month=month,
+        )
+
+        try:
+            closure = (
+                MonthlyClosure.objects
+                .create(
+                    business=business,
+                    year=year,
+                    month=month,
+                    version=next_version,
+                    status=(
+                        MonthlyClosure
+                        .STATUS_CLOSED
+                    ),
+                    summary=summary,
+                    closed_by=request.user,
+                    closed_at=(
+                        django_timezone.now()
+                    ),
                 )
             )
-            .aggregate(
-                count=Count("id"),
-                total=Sum(
-                    "net_commission_payable"
-                ),
-            )
+        except IntegrityError as exc:
+            raise ValidationError({
+                "period": (
+                    "No fue posible crear el cierre "
+                    "mensual porque ya existe otro "
+                    "cierre vigente o la versión "
+                    "ya fue utilizada."
+                )
+            }) from exc
+
+        log_action(
+            request.user,
+            "CREATE_MONTHLY_CLOSURE",
+            closure.__class__.__name__,
+            closure.pk,
+            extra={
+                "year": year,
+                "month": month,
+                "version": next_version,
+            },
         )
 
-        pending_commissions = (
-            commission_settlements
-            .filter(
-                status=(
-                    CommissionSettlement
-                    .STATUS_PENDING
-                )
-            )
-            .aggregate(
-                count=Count("id"),
-                total=Sum(
-                    "net_commission_payable"
-                ),
+        response_serializer = (
+            MonthlyClosureSerializer(
+                closure,
+                context={
+                    "request": request,
+                },
             )
         )
 
         return Response(
-            {
-                "business": {
-                    "public_id": str(
-                        business.public_id
-                    ),
-                    "name": (
-                        business.business_name
-                    ),
-                    "currency": business.currency,
-                },
-                "period": {
-                    "year": year,
-                    "month": month,
-                    "date_from": start_date,
-                    "date_to": end_date,
-                },
-                "transactions": {
-                    "sales": {
-                        "count": sales["count"],
-                        "total": str(
-                            sales["total"]
-                        ),
-                        "paid_count": (
-                            paid_sales["count"]
-                        ),
-                        "paid_total": str(
-                            decimal_or_zero(
-                                paid_sales["total"]
-                            )
-                        ),
-                        "debt_count": (
-                            debt_sales["count"]
-                        ),
-                        "debt_total": str(
-                            decimal_or_zero(
-                                debt_sales["total"]
-                            )
-                        ),
-                    },
-                    "purchases": {
-                        "count": (
-                            purchases["count"]
-                        ),
-                        "total": str(
-                            purchases["total"]
-                        ),
-                    },
-                    "expenses": {
-                        "count": (
-                            expenses["count"]
-                        ),
-                        "total": str(
-                            expenses["total"]
-                        ),
-                    },
-                },
-                "debts": {
-                    "generated_count": (
-                        debt_generated["count"]
-                    ),
-                    "generated_total": str(
-                        decimal_or_zero(
-                            debt_generated[
-                                "total"
-                            ]
-                        )
-                    ),
-                    "payments_count": (
-                        debt_payments["count"]
-                    ),
-                    "payments_total": str(
-                        decimal_or_zero(
-                            debt_payments[
-                                "total"
-                            ]
-                        )
-                    ),
-                    "outstanding_at_period_end": str(
-                        outstanding_total
-                    ),
-                },
-                "cash_registers": {
-                    "closed_count": (
-                        cash_summary[
-                            "registers_count"
-                        ]
-                    ),
-                    "opening_total": str(
-                        decimal_or_zero(
-                            cash_summary[
-                                "opening_total"
-                            ]
-                        )
-                    ),
-                    "expected_total": str(
-                        decimal_or_zero(
-                            cash_summary[
-                                "expected_total"
-                            ]
-                        )
-                    ),
-                    "counted_total": str(
-                        decimal_or_zero(
-                            cash_summary[
-                                "counted_total"
-                            ]
-                        )
-                    ),
-                    "difference_total": str(
-                        decimal_or_zero(
-                            cash_summary[
-                                "difference_total"
-                            ]
-                        )
-                    ),
-                    "shortages_total": str(
-                        decimal_or_zero(
-                            shortages["total"]
-                        )
-                    ),
-                    "surpluses_total": str(
-                        decimal_or_zero(
-                            surpluses["total"]
-                        )
-                    ),
-                },
-                "commissions": {
-                    "settlements_count": (
-                        commission_summary[
-                            "settlements_count"
-                        ]
-                    ),
-                    "settled_sales_total": str(
-                        decimal_or_zero(
-                            commission_summary[
-                                "sales_total"
-                            ]
-                        )
-                    ),
-                    "gross_commission_total": str(
-                        decimal_or_zero(
-                            commission_summary[
-                                "commission_total"
-                            ]
-                        )
-                    ),
-                    "employee_advances": str(
-                        decimal_or_zero(
-                            commission_summary[
-                                "employee_advances"
-                            ]
-                        )
-                    ),
-                    "employee_repayments": str(
-                        decimal_or_zero(
-                            commission_summary[
-                                "employee_repayments"
-                            ]
-                        )
-                    ),
-                    "advance_balance": str(
-                        decimal_or_zero(
-                            commission_summary[
-                                "advance_balance"
-                            ]
-                        )
-                    ),
-                    "net_commission_payable": str(
-                        decimal_or_zero(
-                            commission_summary[
-                                "net_commission_payable"
-                            ]
-                        )
-                    ),
-                    "remaining_advance_balance": str(
-                        decimal_or_zero(
-                            commission_summary[
-                                "remaining_advance_balance"
-                            ]
-                        )
-                    ),
-                    "paid": {
-                        "count": (
-                            paid_commissions[
-                                "count"
-                            ]
-                        ),
-                        "total": str(
-                            decimal_or_zero(
-                                paid_commissions[
-                                    "total"
-                                ]
-                            )
-                        ),
-                    },
-                    "pending": {
-                        "count": (
-                            pending_commissions[
-                                "count"
-                            ]
-                        ),
-                        "total": str(
-                            decimal_or_zero(
-                                pending_commissions[
-                                    "total"
-                                ]
-                            )
-                        ),
-                    },
-                },
+            response_serializer.data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(
+        tags=["Monthly Closures"],
+        summary="Reabrir un cierre mensual",
+        request=MonthlyClosureReopenSerializer,
+        responses={
+            200: MonthlyClosureSerializer,
+        },
+    )
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="reopen",
+    )
+    @db_tx.atomic
+    def reopen(
+        self,
+        request,
+        public_id=None,
+    ):
+        serializer = self.get_serializer(
+            data=request.data
+        )
+
+        serializer.is_valid(
+            raise_exception=True
+        )
+
+        closure = (
+            MonthlyClosure.objects
+            .select_for_update()
+            .get(
+                public_id=public_id
+            )
+        )
+
+        self.check_object_permissions(
+            request,
+            closure,
+        )
+
+        self._validate_management_access(
+            closure.business
+        )
+
+        if (
+            closure.status
+            != MonthlyClosure.STATUS_CLOSED
+        ):
+            raise ValidationError({
+                "status": (
+                    "Este cierre mensual ya está "
+                    "reabierto."
+                )
+            })
+
+        closure.status = (
+            MonthlyClosure.STATUS_REOPENED
+        )
+
+        closure.reopened_by = request.user
+
+        closure.reopened_at = (
+            django_timezone.now()
+        )
+
+        closure.reopen_reason = (
+            serializer.validated_data[
+                "reason"
+            ]
+        )
+
+        closure.save(
+            update_fields=[
+                "status",
+                "reopened_by",
+                "reopened_at",
+                "reopen_reason",
+                "updated_at",
+            ]
+        )
+
+        log_action(
+            request.user,
+            "REOPEN_MONTHLY_CLOSURE",
+            closure.__class__.__name__,
+            closure.pk,
+            extra={
+                "year": closure.year,
+                "month": closure.month,
+                "version": closure.version,
+                "reason": (
+                    closure.reopen_reason
+                ),
             },
+        )
+
+        response_serializer = (
+            MonthlyClosureSerializer(
+                closure,
+                context={
+                    "request": request,
+                },
+            )
+        )
+
+        return Response(
+            response_serializer.data,
+            status=status.HTTP_200_OK,
+        )
+
+class CustomerSummaryView(
+    APIView
+):
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    @extend_schema(
+        tags=["Reports"],
+        summary="Resumen de clientes",
+        description=(
+            "Calcula las ventas acumuladas por "
+            "cliente dentro de un rango de fechas."
+        ),
+        parameters=[
+            CustomerSummaryQuerySerializer,
+        ],
+        responses={
+            200: OpenApiResponse(
+                description=(
+                    "Resumen dinámico de clientes."
+                )
+            ),
+        },
+    )
+    def get(
+        self,
+        request,
+    ):
+        query_serializer = (
+            CustomerSummaryQuerySerializer(
+                data=request.query_params
+            )
+        )
+
+        query_serializer.is_valid(
+            raise_exception=True
+        )
+
+        validated_data = (
+            query_serializer.validated_data
+        )
+
+        business = get_object_or_404(
+            Business,
+            public_id=validated_data[
+                "business_public_id"
+            ],
+        )
+
+        validate_report_business_access(
+            user=request.user,
+            business=business,
+        )
+
+        customer = None
+
+        customer_public_id = (
+            validated_data.get(
+                "customer_public_id"
+            )
+        )
+
+        if customer_public_id is not None:
+            customer = get_object_or_404(
+                Customer,
+                public_id=customer_public_id,
+                business=business,
+            )
+
+        summary = build_customers_summary(
+            business=business,
+            date_from=validated_data[
+                "date_from"
+            ],
+            date_to=validated_data[
+                "date_to"
+            ],
+            customer=customer,
+        )
+
+        return Response(
+            summary,
+            status=status.HTTP_200_OK,
+        )
+
+
+class SupplierSummaryView(
+    APIView
+):
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    @extend_schema(
+        tags=["Reports"],
+        summary="Resumen de proveedores",
+        description=(
+            "Calcula las compras acumuladas por "
+            "proveedor dentro de un rango de fechas."
+        ),
+        parameters=[
+            SupplierSummaryQuerySerializer,
+        ],
+        responses={
+            200: OpenApiResponse(
+                description=(
+                    "Resumen dinámico de proveedores."
+                )
+            ),
+        },
+    )
+    def get(
+        self,
+        request,
+    ):
+        query_serializer = (
+            SupplierSummaryQuerySerializer(
+                data=request.query_params
+            )
+        )
+
+        query_serializer.is_valid(
+            raise_exception=True
+        )
+
+        validated_data = (
+            query_serializer.validated_data
+        )
+
+        business = get_object_or_404(
+            Business,
+            public_id=validated_data[
+                "business_public_id"
+            ],
+        )
+
+        validate_report_business_access(
+            user=request.user,
+            business=business,
+        )
+
+        supplier = None
+
+        supplier_public_id = (
+            validated_data.get(
+                "supplier_public_id"
+            )
+        )
+
+        if supplier_public_id is not None:
+            supplier = get_object_or_404(
+                Supplier,
+                public_id=supplier_public_id,
+                business=business,
+            )
+
+        summary = build_suppliers_summary(
+            business=business,
+            date_from=validated_data[
+                "date_from"
+            ],
+            date_to=validated_data[
+                "date_to"
+            ],
+            supplier=supplier,
+        )
+
+        return Response(
+            summary,
+            status=status.HTTP_200_OK,
+        )
+
+class PaymentSummaryView(
+    APIView
+):
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    @extend_schema(
+        tags=["Reports"],
+        summary="Resumen de pagos",
+        description=(
+            "Resume entradas y salidas agrupadas "
+            "por método de pago."
+        ),
+        parameters=[
+            PaymentSummaryQuerySerializer,
+        ],
+        responses={
+            200: OpenApiResponse(
+                description=(
+                    "Resumen dinámico de pagos."
+                )
+            ),
+        },
+    )
+    def get(
+        self,
+        request,
+    ):
+        query_serializer = (
+            PaymentSummaryQuerySerializer(
+                data=request.query_params
+            )
+        )
+
+        query_serializer.is_valid(
+            raise_exception=True
+        )
+
+        validated_data = (
+            query_serializer.validated_data
+        )
+
+        business = get_object_or_404(
+            Business,
+            public_id=validated_data[
+                "business_public_id"
+            ],
+        )
+
+        validate_report_business_access(
+            user=request.user,
+            business=business,
+        )
+
+        payment_method = None
+
+        payment_method_public_id = (
+            validated_data.get(
+                "payment_method_public_id"
+            )
+        )
+
+        if (
+            payment_method_public_id
+            is not None
+        ):
+            payment_method = get_object_or_404(
+                PaymentMethod,
+                public_id=(
+                    payment_method_public_id
+                ),
+                business=business,
+            )
+
+        summary = build_payments_summary(
+            business=business,
+            date_from=validated_data[
+                "date_from"
+            ],
+            date_to=validated_data[
+                "date_to"
+            ],
+            payment_method=payment_method,
+        )
+
+        return Response(
+            summary,
+            status=status.HTTP_200_OK,
+        )
+
+
+class DebtSummaryView(
+    APIView
+):
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    @extend_schema(
+        tags=["Reports"],
+        summary="Resumen de deudas",
+        description=(
+            "Calcula deudas generadas, pagos y "
+            "cartera pendiente dentro del período."
+        ),
+        parameters=[
+            DebtSummaryQuerySerializer,
+        ],
+        responses={
+            200: OpenApiResponse(
+                description=(
+                    "Resumen dinámico de deudas."
+                )
+            ),
+        },
+    )
+    def get(
+        self,
+        request,
+    ):
+        query_serializer = (
+            DebtSummaryQuerySerializer(
+                data=request.query_params
+            )
+        )
+
+        query_serializer.is_valid(
+            raise_exception=True
+        )
+
+        validated_data = (
+            query_serializer.validated_data
+        )
+
+        business = get_object_or_404(
+            Business,
+            public_id=validated_data[
+                "business_public_id"
+            ],
+        )
+
+        validate_report_business_access(
+            user=request.user,
+            business=business,
+        )
+
+        summary = build_debts_summary(
+            business=business,
+            date_from=validated_data[
+                "date_from"
+            ],
+            date_to=validated_data[
+                "date_to"
+            ],
+        )
+
+        return Response(
+            summary,
+            status=status.HTTP_200_OK,
+        )
+
+class InventorySummaryView(
+    APIView
+):
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    @extend_schema(
+        tags=["Reports"],
+        summary="Resumen histórico de inventario",
+        description=(
+            "Calcula existencias iniciales, "
+            "entradas, ventas, ajustes y "
+            "existencias finales por producto "
+            "o variante dentro de un período."
+        ),
+        parameters=[
+            InventorySummaryQuerySerializer,
+        ],
+        responses={
+            200: OpenApiResponse(
+                description=(
+                    "Resumen dinámico de inventario."
+                )
+            ),
+        },
+    )
+    def get(
+        self,
+        request,
+    ):
+        query_serializer = (
+            InventorySummaryQuerySerializer(
+                data=request.query_params
+            )
+        )
+
+        query_serializer.is_valid(
+            raise_exception=True
+        )
+
+        validated_data = (
+            query_serializer.validated_data
+        )
+
+        business = get_object_or_404(
+            Business,
+            public_id=validated_data[
+                "business_public_id"
+            ],
+        )
+
+        validate_report_business_access(
+            user=request.user,
+            business=business,
+            allowed_roles=[
+                BusinessMembership.ROLE_OWNER,
+                BusinessMembership.ROLE_ADMIN,
+                BusinessMembership.ROLE_INVENTORY,
+            ],
+        )
+
+        product = None
+        variant = None
+
+        product_public_id = (
+            validated_data.get(
+                "product_public_id"
+            )
+        )
+
+        variant_public_id = (
+            validated_data.get(
+                "variant_public_id"
+            )
+        )
+
+        if product_public_id is not None:
+            product = get_object_or_404(
+                Product,
+                public_id=(
+                    product_public_id
+                ),
+                business=business,
+            )
+
+        if variant_public_id is not None:
+            variant = get_object_or_404(
+                ProductVariant.objects
+                .select_related(
+                    "variant_type",
+                    "variant_type__product",
+                ),
+                public_id=(
+                    variant_public_id
+                ),
+                variant_type__product=product,
+            )
+
+        summary = build_inventory_summary(
+            business=business,
+            date_from=validated_data[
+                "date_from"
+            ],
+            date_to=validated_data[
+                "date_to"
+            ],
+            product=product,
+            variant=variant,
+        )
+
+        return Response(
+            summary,
+            status=status.HTTP_200_OK,
+        )
+
+class DashboardOverviewView(
+    APIView
+):
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    @extend_schema(
+        tags=["Dashboard"],
+        summary="Vista general del negocio",
+        description=(
+            "Devuelve indicadores resumidos de "
+            "ventas, compras, gastos, deudas, "
+            "caja, comisiones e inventario."
+        ),
+        parameters=[
+            DashboardOverviewQuerySerializer,
+        ],
+        responses={
+            200: OpenApiResponse(
+                description=(
+                    "Indicadores generales del "
+                    "negocio."
+                )
+            ),
+        },
+    )
+    def get(
+        self,
+        request,
+    ):
+        query_serializer = (
+            DashboardOverviewQuerySerializer(
+                data=request.query_params
+            )
+        )
+
+        query_serializer.is_valid(
+            raise_exception=True
+        )
+
+        validated_data = (
+            query_serializer.validated_data
+        )
+
+        business = get_object_or_404(
+            Business,
+            public_id=validated_data[
+                "business_public_id"
+            ],
+        )
+
+        validate_report_business_access(
+            user=request.user,
+            business=business,
+            allowed_roles=[
+                BusinessMembership.ROLE_OWNER,
+                BusinessMembership.ROLE_ADMIN,
+                BusinessMembership.ROLE_VIEWER,
+            ],
+        )
+
+        overview = build_dashboard_overview(
+            business=business,
+            date_from=validated_data[
+                "date_from"
+            ],
+            date_to=validated_data[
+                "date_to"
+            ],
+            low_stock_threshold=(
+                validated_data[
+                    "low_stock_threshold"
+                ]
+            ),
+        )
+
+        return Response(
+            overview,
             status=status.HTTP_200_OK,
         )

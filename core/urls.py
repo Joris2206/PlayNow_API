@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    CommissionSettlementViewSet, healthcheck, RegisterViewSet,
+    CommissionSettlementViewSet, CustomerSummaryView, DebtSummaryView, InventorySummaryView, SupplierSummaryView, healthcheck, RegisterViewSet,
     BusinessViewSet, EntityStatusViewSet,
     ProductCategoryViewSet, ProductViewSet, ProductVariantTypeViewSet, ProductVariantViewSet,
     EmployeeViewSet, CustomerViewSet, SupplierViewSet, PaymentMethodViewSet,
@@ -10,7 +10,8 @@ from .views import (
     BudgetViewSet, GoalViewSet, GoalProgressViewSet,
     StockMovementViewSet, UserViewSet, PasswordResetRequestView, PasswordResetConfirmView,
     EmployeeCommissionPlanViewSet, EmployeeCommissionPreviewView, EmployeeSalesReportView,
-    CashMovementViewSet, CashRegisterViewSet, MonthlySummaryView
+    CashMovementViewSet, CashRegisterViewSet, MonthlySummaryView, MonthlyClosureViewSet, PaymentSummaryView,
+    DashboardOverviewView
 )
 
 router = DefaultRouter()
@@ -64,13 +65,71 @@ router.register(r'cash-movements', CashMovementViewSet, basename='cash-movement'
 router.register(r'cash-registers', CashRegisterViewSet, basename='cash-register')
 
 #Cierres mensuales
+router.register(r'monthly-closures', MonthlyClosureViewSet, basename='monthly-closure')
 
 urlpatterns = [
-    path("reports/employee-sales/", EmployeeSalesReportView.as_view(), name="employee-sales-report"),
-    path("reports/employee-commission/", EmployeeCommissionPreviewView.as_view(), name="employee-commission-preview"),
-    path("auth/password/reset/", PasswordResetRequestView.as_view(), name="password-reset-request"),
-    path("auth/password/reset/confirm/", PasswordResetConfirmView.as_view(), name="password-reset-confirm"),
-    path("reports/monthly-summary/", MonthlySummaryView.as_view(), name="monthly-summary"),
-    path('health/', healthcheck, name='healthcheck'),
-    path('', include(router.urls)),
+    path(
+        "reports/employee-sales/",
+        EmployeeSalesReportView.as_view(),
+        name="employee-sales-report",
+    ),
+    path(
+        "reports/employee-commission/",
+        EmployeeCommissionPreviewView.as_view(),
+        name="employee-commission-preview",
+    ),
+    path(
+        "auth/password/reset/",
+        PasswordResetRequestView.as_view(),
+        name="password-reset-request",
+    ),
+    path(
+        "auth/password/reset/confirm/",
+        PasswordResetConfirmView.as_view(),
+        name="password-reset-confirm",
+    ),
+    path(
+        "reports/monthly-summary/",
+        MonthlySummaryView.as_view(),
+        name="monthly-summary",
+    ),
+    path(
+        "reports/customers-summary/",
+        CustomerSummaryView.as_view(),
+        name="customers-summary",
+    ),
+    path(
+        "reports/suppliers-summary/",
+        SupplierSummaryView.as_view(),
+        name="suppliers-summary",
+    ),
+    path(
+        "reports/debts-summary/",
+        DebtSummaryView.as_view(),
+        name="debts-summary",
+    ),
+    path(
+        "reports/payments-summary/",
+        PaymentSummaryView.as_view(),
+        name="payments-summary",
+    ),
+    path(
+        "reports/inventory-summary/",
+        InventorySummaryView.as_view(),
+        name="inventory-summary",
+    ),
+    path(
+        "dashboard/overview/",
+        DashboardOverviewView.as_view(),
+        name="dashboard-overview",
+    ),
+    path(
+        "health/",
+        healthcheck,
+        name="healthcheck",
+    ),
+    path(
+        "",
+        include(router.urls),
+    ),
 ]

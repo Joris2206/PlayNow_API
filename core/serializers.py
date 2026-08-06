@@ -7,14 +7,12 @@ from rest_framework import serializers
 
 from core.utils import calculate_employee_advance_summary
 from .models import (
-    BusinessMembership, User, Business, EntityStatus,
+    BusinessMembership, MonthlyClosure, User, Business, EntityStatus,
     ProductCategory, Product, ProductVariantType, ProductVariant,
     Employee, Customer, Supplier, PaymentMethod,
     Transaction, TransactionDetail, StockMovement,
     Debt, DebtPayment, Notification, Reminder,
     Budget, Goal, GoalProgress,
-    SalesSummary, SuppliersSummary, CustomersSummary,
-    PaymentsSummary, DebtsSummary, InventorySummary,
     CommissionSettlement, EmployeeCommissionPlan,
     CashMovement, CashRegister
 )
@@ -2631,6 +2629,164 @@ class MonthlySummaryQuerySerializer(
         max_value=12,
     )
 
+class MonthlyClosureCreateSerializer(
+    serializers.Serializer
+):
+    business = public_id_field(
+        Business
+    )
+
+    year = serializers.IntegerField(
+        min_value=2000,
+        max_value=2100,
+    )
+
+    month = serializers.IntegerField(
+        min_value=1,
+        max_value=12,
+    )
+
+
+class MonthlyClosureReopenSerializer(
+    serializers.Serializer
+):
+    reason = serializers.CharField(
+        min_length=5,
+        max_length=1000,
+        trim_whitespace=True,
+    )
+
+
+class MonthlyClosureSerializer(
+    serializers.ModelSerializer
+):
+    business = public_id_read_only()
+
+    business_name = serializers.CharField(
+        source="business.business_name",
+        read_only=True,
+    )
+
+    business_currency = (
+        serializers.CharField(
+            source="business.currency",
+            read_only=True,
+        )
+    )
+
+    closed_by = serializers.SlugRelatedField(
+        slug_field="public_id",
+        read_only=True,
+    )
+
+    closed_by_name = serializers.CharField(
+        source="closed_by.full_name",
+        read_only=True,
+    )
+
+    reopened_by = serializers.SlugRelatedField(
+        slug_field="public_id",
+        read_only=True,
+        allow_null=True,
+    )
+
+    reopened_by_name = serializers.CharField(
+        source="reopened_by.full_name",
+        read_only=True,
+        allow_null=True,
+    )
+
+    class Meta:
+        model = MonthlyClosure
+
+        fields = (
+            "public_id",
+            "business",
+            "business_name",
+            "business_currency",
+            "year",
+            "month",
+            "version",
+            "status",
+            "summary",
+            "closed_by",
+            "closed_by_name",
+            "closed_at",
+            "reopened_by",
+            "reopened_by_name",
+            "reopened_at",
+            "reopen_reason",
+            "created_at",
+            "updated_at",
+        )
+
+        read_only_fields = fields
+
+class CustomerSummaryQuerySerializer(
+    serializers.Serializer
+):
+    business_public_id = (
+        serializers.UUIDField()
+    )
+
+    date_from = serializers.DateField()
+
+    date_to = serializers.DateField()
+
+    customer_public_id = (
+        serializers.UUIDField(
+            required=False,
+            allow_null=True,
+        )
+    )
+
+    def validate(self, attrs):
+        if (
+            attrs["date_from"]
+            > attrs["date_to"]
+        ):
+            raise serializers.ValidationError({
+                "date_to": (
+                    "La fecha final no puede ser "
+                    "anterior a la fecha inicial."
+                )
+            })
+
+        return attrs
+
+
+class SupplierSummaryQuerySerializer(
+    serializers.Serializer
+):
+    business_public_id = (
+        serializers.UUIDField()
+    )
+
+    date_from = serializers.DateField()
+
+    date_to = serializers.DateField()
+
+    supplier_public_id = (
+        serializers.UUIDField(
+            required=False,
+            allow_null=True,
+        )
+    )
+
+    def validate(self, attrs):
+        if (
+            attrs["date_from"]
+            > attrs["date_to"]
+        ):
+            raise serializers.ValidationError({
+                "date_to": (
+                    "La fecha final no puede ser "
+                    "anterior a la fecha inicial."
+                )
+            })
+
+        return attrs
+
 # ---------- Lecturas (solo por si las quieres exponer) ----------
 class StockMovementSerializer(serializers.ModelSerializer):
     product = public_id_read_only()
@@ -2660,32 +2816,142 @@ class StockMovementSerializer(serializers.ModelSerializer):
         )
         read_only_fields = fields
 
-class SalesSummarySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = SalesSummary
-        fields = "__all__"
+class PaymentSummaryQuerySerializer(
+    serializers.Serializer
+):
+    business_public_id = serializers.UUIDField()
 
-class SuppliersSummarySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = SuppliersSummary
-        fields = "__all__"
+    date_from = serializers.DateField()
 
-class CustomersSummarySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = CustomersSummary
-        fields = "__all__"
+    date_to = serializers.DateField()
 
-class PaymentsSummarySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = PaymentsSummary
-        fields = "__all__"
+    payment_method_public_id = (
+        serializers.UUIDField(
+            required=False,
+            allow_null=True,
+        )
+    )
 
-class DebtsSummarySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = DebtsSummary
-        fields = "__all__"
+    def validate(self, attrs):
+        if (
+            attrs["date_from"]
+            > attrs["date_to"]
+        ):
+            raise serializers.ValidationError({
+                "date_to": (
+                    "La fecha final no puede ser "
+                    "anterior a la fecha inicial."
+                )
+            })
 
-class InventorySummarySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = InventorySummary
-        fields = "__all__"
+        return attrs
+
+
+class DebtSummaryQuerySerializer(
+    serializers.Serializer
+):
+    business_public_id = serializers.UUIDField()
+
+    date_from = serializers.DateField()
+
+    date_to = serializers.DateField()
+
+    def validate(self, attrs):
+        if (
+            attrs["date_from"]
+            > attrs["date_to"]
+        ):
+            raise serializers.ValidationError({
+                "date_to": (
+                    "La fecha final no puede ser "
+                    "anterior a la fecha inicial."
+                )
+            })
+
+        return attrs
+
+class InventorySummaryQuerySerializer(
+    serializers.Serializer
+):
+    business_public_id = (
+        serializers.UUIDField()
+    )
+
+    date_from = serializers.DateField()
+
+    date_to = serializers.DateField()
+
+    product_public_id = (
+        serializers.UUIDField(
+            required=False,
+            allow_null=True,
+        )
+    )
+
+    variant_public_id = (
+        serializers.UUIDField(
+            required=False,
+            allow_null=True,
+        )
+    )
+
+    def validate(self, attrs):
+        if (
+            attrs["date_from"]
+            > attrs["date_to"]
+        ):
+            raise serializers.ValidationError({
+                "date_to": (
+                    "La fecha final no puede ser "
+                    "anterior a la fecha inicial."
+                )
+            })
+
+        if (
+            attrs.get("variant_public_id")
+            is not None
+            and attrs.get("product_public_id")
+            is None
+        ):
+            raise serializers.ValidationError({
+                "product_public_id": (
+                    "Debes indicar el producto "
+                    "cuando filtras por variante."
+                )
+            })
+
+        return attrs
+
+class DashboardOverviewQuerySerializer(
+    serializers.Serializer
+):
+    business_public_id = (
+        serializers.UUIDField()
+    )
+
+    date_from = serializers.DateField()
+
+    date_to = serializers.DateField()
+
+    low_stock_threshold = (
+        serializers.IntegerField(
+            required=False,
+            default=5,
+            min_value=0,
+            max_value=1_000_000,
+        )
+    )
+
+    def validate(self, attrs):
+        if (
+            attrs["date_from"]
+            > attrs["date_to"]
+        ):
+            raise serializers.ValidationError({
+                "date_to": (
+                    "La fecha final no puede ser "
+                    "anterior a la fecha inicial."
+                )
+            })
+
+        return attrs
