@@ -1534,6 +1534,7 @@ class NotificationSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True,
     )
+    status = public_id_field(EntityStatus, required=False)
 
     class Meta:
         model = Notification
@@ -1595,6 +1596,7 @@ class ReminderSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True,
     )
+    status = public_id_field(EntityStatus, required=False)
 
     class Meta:
         model = Reminder
@@ -1690,6 +1692,7 @@ class BudgetSerializer(serializers.ModelSerializer):
 
 class GoalSerializer(serializers.ModelSerializer):
     business = public_id_field(Business)
+    status = public_id_field(EntityStatus, required=False)
 
     class Meta:
         model = Goal
@@ -2646,7 +2649,6 @@ class MonthlyClosureCreateSerializer(
         max_value=12,
     )
 
-
 class MonthlyClosureReopenSerializer(
     serializers.Serializer
 ):
@@ -2655,7 +2657,6 @@ class MonthlyClosureReopenSerializer(
         max_length=1000,
         trim_whitespace=True,
     )
-
 
 class MonthlyClosureSerializer(
     serializers.ModelSerializer
@@ -2753,7 +2754,6 @@ class CustomerSummaryQuerySerializer(
             })
 
         return attrs
-
 
 class SupplierSummaryQuerySerializer(
     serializers.Serializer

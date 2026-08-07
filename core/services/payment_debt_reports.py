@@ -394,7 +394,6 @@ def build_payments_summary(
         "results": results,
     }
 
-
 def build_debts_summary(
     *,
     business,

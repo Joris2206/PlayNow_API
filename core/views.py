@@ -2942,6 +2942,14 @@ class GoalProgressViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
+
+    http_method_names = [
+        "get",
+        "post",
+        "head",
+        "options",
+    ]
+
     pagination_class = StandardResultsSetPagination
 
 @extend_schema(tags=["Users"])
@@ -5293,7 +5301,6 @@ class PaymentSummaryView(
             summary,
             status=status.HTTP_200_OK,
         )
-
 
 class DebtSummaryView(
     APIView

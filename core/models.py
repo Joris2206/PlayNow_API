@@ -102,7 +102,6 @@ class User(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return f"{self.full_name} <{self.email}>"
 
-
 class Business(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='businesses')
@@ -141,7 +140,6 @@ class Business(models.Model):
             )
 
         return memberships.exists()
-
 
 class BusinessMembership(models.Model):
     ROLE_OWNER = "owner"
@@ -461,8 +459,6 @@ class PaymentMethod(models.Model):
     status = models.ForeignKey(
         "EntityStatus",
         on_delete=models.PROTECT,
-        null=True,
-        blank=True,
         related_name="payment_methods",
     )
 
@@ -692,7 +688,6 @@ class CashRegister(models.Model):
             f"{self.employee.full_name} · "
             f"{self.status}"
         )
-
 
 class CashMovement(models.Model):
     TYPE_DEPOSIT = "deposit"
@@ -1079,6 +1074,10 @@ class Notification(models.Model):
     scheduled_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    status = models.ForeignKey(
+        EntityStatus,
+        on_delete=models.PROTECT,
+    )
 
     def __str__(self):
         kind = dict(self.NOTIFICATION_TYPES).get(self.type, self.type)
@@ -1095,7 +1094,11 @@ class Reminder(models.Model):
     transaction = models.ForeignKey('Transaction', on_delete=models.SET_NULL, null=True, blank=True, related_name='reminders')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
+    status = models.ForeignKey(
+        EntityStatus,
+        on_delete=models.PROTECT,
+    )
+    
     def __str__(self):
         due = f" · due {self.due_date}" if self.due_date else ""
         return f"{self.title}{due}"
@@ -1213,7 +1216,6 @@ class Budget(models.Model):
         rng = f"{self.period_start}→{self.period_end}"
         return f"Budget {self.public_id} · {self.business.business_name} · {rng}"
 
-
 class Goal(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='goals')
@@ -1227,6 +1229,10 @@ class Goal(models.Model):
     is_completed = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    status = models.ForeignKey(
+        EntityStatus,
+        on_delete=models.PROTECT,
+    )
 
     def __str__(self):
         prog = f"{self.current_amount}/{self.target_amount}"
