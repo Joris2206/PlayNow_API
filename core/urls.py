@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    CommissionSettlementViewSet, CustomerSummaryView, DebtSummaryView, InventorySummaryView, SupplierSummaryView, healthcheck, RegisterViewSet,
+    CommissionSettlementViewSet, CurrentUserView, CustomerSummaryView, DebtSummaryView, InventorySummaryView, SupplierSummaryView, healthcheck, RegisterViewSet,
     BusinessViewSet, EntityStatusViewSet,
     ProductCategoryViewSet, ProductViewSet, ProductVariantTypeViewSet, ProductVariantViewSet,
     EmployeeViewSet, CustomerViewSet, SupplierViewSet, PaymentMethodViewSet,
@@ -122,6 +122,11 @@ urlpatterns = [
         "dashboard/overview/",
         DashboardOverviewView.as_view(),
         name="dashboard-overview",
+    ),
+    path(
+        "me/",
+        CurrentUserView.as_view(),
+        name="current-user",
     ),
     path(
         "health/",

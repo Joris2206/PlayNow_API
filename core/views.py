@@ -42,6 +42,7 @@ from .serializers import (
     MonthlySummaryQuerySerializer,
     PaymentSummaryQuerySerializer,
     SupplierSummaryQuerySerializer,
+    CurrentUserSerializer,
 )
 from datetime import (
     date,
@@ -5567,5 +5568,68 @@ class DashboardOverviewView(
 
         return Response(
             overview,
+            status=status.HTTP_200_OK,
+        )
+
+class CurrentUserView(APIView):
+    permission_classes = [
+        IsAuthenticated,
+    ]
+
+    @extend_schema(
+        tags=["Authentication"],
+        summary="Obtener usuario autenticado",
+        responses={
+            200: CurrentUserSerializer,
+        },
+    )
+    def get(
+        self,
+        request,
+    ):
+        user = request.user
+
+        memberships = (
+            BusinessMembership.objects
+            .select_related(
+                "business",
+            )
+            .filter(
+                user=user,
+                is_active=True,
+            )
+            .order_by(
+                "business__business_name",
+            )
+        )
+
+        data = {
+            "public_id": user.public_id,
+            "email": user.email,
+            "full_name": user.full_name,
+
+            "memberships": [
+                {
+                    "membership_public_id": (
+                        membership.public_id
+                    ),
+                    "business_public_id": (
+                        membership.business.public_id
+                    ),
+                    "business_name": (
+                        membership.business.business_name
+                    ),
+                    "role": membership.role,
+                }
+                for membership in memberships
+            ],
+        }
+
+        serializer = CurrentUserSerializer(
+            data
+        )
+
+        return Response(
+            serializer.data,
             status=status.HTTP_200_OK,
         )

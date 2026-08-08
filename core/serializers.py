@@ -1549,6 +1549,7 @@ class NotificationSerializer(serializers.ModelSerializer):
             "transaction",
             "is_read",
             "sent_at",
+            "status",
             "scheduled_at",
             "created_at",
             "updated_at",
@@ -1609,6 +1610,7 @@ class ReminderSerializer(serializers.ModelSerializer):
             "user",
             "business",
             "transaction",
+            "status",
             "created_at",
             "updated_at",
         )
@@ -1704,6 +1706,7 @@ class GoalSerializer(serializers.ModelSerializer):
             "description",
             "target_amount",
             "current_amount",
+            "status",
             "start_date",
             "end_date",
             "is_completed",
@@ -2955,3 +2958,23 @@ class DashboardOverviewQuerySerializer(
             })
 
         return attrs
+
+class CurrentMembershipSerializer(
+    serializers.Serializer
+):
+    membership_public_id = serializers.UUIDField()
+    business_public_id = serializers.UUIDField()
+    business_name = serializers.CharField()
+    role = serializers.CharField()
+
+
+class CurrentUserSerializer(
+    serializers.Serializer
+):
+    public_id = serializers.UUIDField()
+    email = serializers.EmailField()
+    full_name = serializers.CharField()
+
+    memberships = CurrentMembershipSerializer(
+        many=True
+    )
