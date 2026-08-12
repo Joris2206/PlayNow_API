@@ -103,10 +103,10 @@ class DebtPaymentBusinessIsolationTests(BusinessIsolationTestCase):
         response = self.client.post(
             "/api/debt-payments/",
             {
-                "debt": str(self.debt_a.public_id),
+                "debt_public_id": str(self.debt_a.public_id),
                 "amount": "30.00",
                 "payment_date": "2026-08-04",
-                "payment_method": str(self.method_a.public_id),
+                "payment_method_public_id": str(self.method_a.public_id),
             },
             format="json",
         )
@@ -118,10 +118,10 @@ class DebtPaymentBusinessIsolationTests(BusinessIsolationTestCase):
         response = self.client.post(
             "/api/debt-payments/",
             {
-                "debt": str(self.debt_a.public_id),
+                "debt_public_id": str(self.debt_a.public_id),
                 "amount": "101.00",
                 "payment_date": "2026-08-04",
-                "payment_method": str(self.method_a.public_id),
+                "payment_method_public_id": str(self.method_a.public_id),
             },
             format="json",
         )

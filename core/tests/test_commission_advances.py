@@ -533,7 +533,7 @@ class CommissionSettlementAdvanceTests(
         return self.client.post(
             "/api/commission-settlements/",
             {
-                "employee": str(
+                "employee_public_id": str(
                     self.seller_employee.public_id
                 ),
                 "period_start": "2026-08-01",

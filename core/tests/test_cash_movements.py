@@ -97,10 +97,10 @@ class CashMovementTests(
         payment_method=None,
     ):
         payload = {
-            "cash_register": str(
+            "cash_register_public_id": str(
                 self.register.public_id
             ),
-            "payment_method": str(
+            "payment_method_public_id": str(
                 (
                     payment_method
                     or self.cash_method
@@ -112,7 +112,7 @@ class CashMovementTests(
         }
 
         if employee is not None:
-            payload["employee"] = str(
+            payload["employee_public_id"] = str(
                 employee.public_id
             )
 

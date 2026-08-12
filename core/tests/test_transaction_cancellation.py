@@ -82,22 +82,22 @@ class TransactionCancellationTests(
         response = self.client.post(
             "/api/transactions/",
             {
-                "business": str(
+                "business_public_id": str(
                     self.business_a.public_id
                 ),
-                "customer": str(
+                "customer_public_id": str(
                     self.customer.public_id
                 ),
-                "employee": str(
+                "employee_public_id": str(
                     self.seller_employee.public_id
                 ),
-                "payment_method": str(
+                "payment_method_public_id": str(
                     self.payment_method.public_id
                 ),
                 "type": "sale",
                 "details": [
                     {
-                        "product": str(
+                        "product_public_id": str(
                             self.product.public_id
                         ),
                         "quantity": quantity,
@@ -131,19 +131,19 @@ class TransactionCancellationTests(
         response = self.client.post(
             "/api/transactions/",
             {
-                "business": str(
+                "business_public_id": str(
                     self.business_a.public_id
                 ),
-                "supplier": str(
+                "supplier_public_id": str(
                     self.supplier.public_id
                 ),
-                "payment_method": str(
+                "payment_method_public_id": str(
                     self.payment_method.public_id
                 ),
                 "type": "purchase",
                 "details": [
                     {
-                        "product": str(
+                        "product_public_id": str(
                             self.product.public_id
                         ),
                         "quantity": quantity,

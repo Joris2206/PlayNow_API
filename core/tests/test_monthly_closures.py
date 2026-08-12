@@ -119,7 +119,7 @@ class MonthlyClosureTests(
         return self.client.post(
             "/api/monthly-closures/",
             {
-                "business": str(
+                "business_public_id": str(
                     business.public_id
                 ),
                 "year": year,

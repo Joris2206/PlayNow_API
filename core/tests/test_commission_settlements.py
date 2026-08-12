@@ -102,7 +102,7 @@ class CommissionSettlementTests(
         return self.client.post(
             "/api/commission-settlements/",
             {
-                "employee": str(
+                "employee_public_id": str(
                     self.seller.public_id
                 ),
                 "period_start": (
@@ -373,7 +373,7 @@ class CommissionSettlementPermissionTests(
         response = self.client.post(
             "/api/commission-settlements/",
             {
-                "employee": str(
+                "employee_public_id": str(
                     self.seller.public_id
                 ),
                 "period_start": (

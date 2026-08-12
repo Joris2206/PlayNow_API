@@ -3,6 +3,11 @@
 from django.db import transaction as db_tx
 from rest_framework import status as drf_status
 from rest_framework.response import Response
+from drf_spectacular.utils import (
+    OpenApiParameter,
+    OpenApiTypes,
+    extend_schema,
+)
 
 from .models import EntityStatus
 
@@ -124,6 +129,22 @@ class RequireBusinessPublicIdListMixin:
     business_lookup = None
     list_allowed_roles = None
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="business_public_id",
+                type=OpenApiTypes.UUID,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description=(
+                    "Public ID del negocio que delimita el listado."
+                ),
+            ),
+        ],
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
     def _get_list_allowed_roles(self):
         roles = getattr(
             self,
@@ -225,4 +246,3 @@ class RequireBusinessPublicIdListMixin:
         return super().filter_queryset(
             queryset
         )
-    

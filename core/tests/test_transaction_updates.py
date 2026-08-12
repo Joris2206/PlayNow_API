@@ -85,16 +85,16 @@ class TransactionUpdateTests(
         response = self.client.post(
             "/api/transactions/",
             {
-                "business": str(
+                "business_public_id": str(
                     self.business_a.public_id
                 ),
-                "customer": str(
+                "customer_public_id": str(
                     self.customer.public_id
                 ),
-                "employee": str(
+                "employee_public_id": str(
                     self.seller_a.public_id
                 ),
-                "payment_method": str(
+                "payment_method_public_id": str(
                     self.payment_method.public_id
                 ),
                 "type": "sale",
@@ -103,7 +103,7 @@ class TransactionUpdateTests(
                 "invoice_series": "A",
                 "details": [
                     {
-                        "product": str(
+                        "product_public_id": str(
                             self.product.public_id
                         ),
                         "quantity": 2,
@@ -138,7 +138,7 @@ class TransactionUpdateTests(
         response = self.client.patch(
             self.endpoint,
             {
-                "business": str(
+                "business_public_id": str(
                     self.business_b.public_id
                 ),
             },
@@ -199,7 +199,7 @@ class TransactionUpdateTests(
             {
                 "details": [
                     {
-                        "product": str(
+                        "product_public_id": str(
                             self.product.public_id
                         ),
                         "quantity": 10,
@@ -308,7 +308,7 @@ class TransactionUpdateTests(
         response = self.client.patch(
             self.endpoint,
             {
-                "employee": str(
+                "employee_public_id": str(
                     self.seller_b.public_id
                 ),
             },
@@ -339,7 +339,7 @@ class TransactionUpdateTests(
         response = self.client.patch(
             self.endpoint,
             {
-                "employee": str(
+                "employee_public_id": str(
                     self.foreign_seller.public_id
                 ),
             },

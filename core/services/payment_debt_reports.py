@@ -573,7 +573,7 @@ def build_debts_summary(
                 "public_id": str(
                     debt.public_id
                 ),
-                "transaction": str(
+                "transaction_public_id": str(
                     debt.transaction.public_id
                 ),
             },

@@ -71,16 +71,16 @@ class TransactionTests(BusinessIsolationTestCase):
 
     def sale_payload(self, *, product=None, variant=None, quantity=1):
         detail = {
-            "product": str((product or self.simple_product).public_id),
+            "product_public_id": str((product or self.simple_product).public_id),
             "quantity": quantity,
         }
         if variant is not None:
-            detail["variant"] = str(variant.public_id)
+            detail["variant_public_id"] = str(variant.public_id)
         return {
-            "business": str(self.business_a.public_id),
-            "customer": str(self.customer.public_id),
-            "employee": str(self.seller_employee.public_id),
-            "payment_method": str(self.method.public_id),
+            "business_public_id": str(self.business_a.public_id),
+            "customer_public_id": str(self.customer.public_id),
+            "employee_public_id": str(self.seller_employee.public_id),
+            "payment_method_public_id": str(self.method.public_id),
             "type": "sale",
             "details": [detail],
         }
@@ -96,10 +96,10 @@ class TransactionTests(BusinessIsolationTestCase):
 
     def test_sale_requires_employee(self):
         payload = self.sale_payload()
-        payload.pop("employee")
+        payload.pop("employee_public_id")
         response = self.client.post("/api/transactions/", payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("employee", response.data)
+        self.assertIn("employee_public_id", response.data)
 
     def test_sale_rejects_employee_from_other_business(self):
         _, foreign_employee, _ = create_role_user(
@@ -108,10 +108,10 @@ class TransactionTests(BusinessIsolationTestCase):
             status=self.active_status,
         )
         payload = self.sale_payload()
-        payload["employee"] = str(foreign_employee.public_id)
+        payload["employee_public_id"] = str(foreign_employee.public_id)
         response = self.client.post("/api/transactions/", payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("employee", response.data)
+        self.assertIn("employee_public_id", response.data)
 
     def test_sale_without_unit_price_uses_base_price(self):
         response = self.client.post(
@@ -145,8 +145,8 @@ class TransactionTests(BusinessIsolationTestCase):
     def test_sale_can_include_multiple_products(self):
         payload = self.sale_payload(quantity=2)
         payload["details"].append({
-            "product": str(self.variant_product.public_id),
-            "variant": str(self.variant.public_id),
+            "product_public_id": str(self.variant_product.public_id),
+            "variant_public_id": str(self.variant.public_id),
             "quantity": 1,
         })
         response = self.client.post("/api/transactions/", payload, format="json")
@@ -174,8 +174,8 @@ class TransactionTests(BusinessIsolationTestCase):
     def test_expense_does_not_create_details_or_stock_movements(self):
         self.authenticate_as(self.user_a)
         payload = {
-            "business": str(self.business_a.public_id),
-            "payment_method": str(self.method.public_id),
+            "business_public_id": str(self.business_a.public_id),
+            "payment_method_public_id": str(self.method.public_id),
             "type": "expense",
             "concept": "Pago de energía",
             "expense_amount": "500.00",

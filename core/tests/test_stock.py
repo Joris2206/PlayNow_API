@@ -56,12 +56,12 @@ class TransactionStockTests(BusinessIsolationTestCase):
         response = self.client.post(
             "/api/transactions/",
             {
-                "business": str(self.business_a.public_id),
-                "customer": str(self.customer.public_id),
-                "employee": str(self.seller_employee.public_id),
-                "payment_method": str(self.method.public_id),
+                "business_public_id": str(self.business_a.public_id),
+                "customer_public_id": str(self.customer.public_id),
+                "employee_public_id": str(self.seller_employee.public_id),
+                "payment_method_public_id": str(self.method.public_id),
                 "type": "sale",
-                "details": [{"product": str(self.product.public_id), "quantity": 3}],
+                "details": [{"product_public_id": str(self.product.public_id), "quantity": 3}],
             },
             format="json",
         )
@@ -78,11 +78,11 @@ class TransactionStockTests(BusinessIsolationTestCase):
         response = self.client.post(
             "/api/transactions/",
             {
-                "business": str(self.business_a.public_id),
-                "supplier": str(self.supplier.public_id),
-                "payment_method": str(self.method.public_id),
+                "business_public_id": str(self.business_a.public_id),
+                "supplier_public_id": str(self.supplier.public_id),
+                "payment_method_public_id": str(self.method.public_id),
                 "type": "purchase",
-                "details": [{"product": str(self.product.public_id), "quantity": 5}],
+                "details": [{"product_public_id": str(self.product.public_id), "quantity": 5}],
             },
             format="json",
         )
@@ -95,12 +95,12 @@ class TransactionStockTests(BusinessIsolationTestCase):
         response = self.client.post(
             "/api/transactions/",
             {
-                "business": str(self.business_a.public_id),
-                "customer": str(self.customer.public_id),
-                "employee": str(self.seller_employee.public_id),
-                "payment_method": str(self.method.public_id),
+                "business_public_id": str(self.business_a.public_id),
+                "customer_public_id": str(self.customer.public_id),
+                "employee_public_id": str(self.seller_employee.public_id),
+                "payment_method_public_id": str(self.method.public_id),
                 "type": "sale",
-                "details": [{"product": str(self.product.public_id), "quantity": 11}],
+                "details": [{"product_public_id": str(self.product.public_id), "quantity": 11}],
             },
             format="json",
         )
@@ -123,14 +123,14 @@ class TransactionStockTests(BusinessIsolationTestCase):
         response = self.client.post(
             "/api/transactions/",
             {
-                "business": str(self.business_a.public_id),
-                "customer": str(self.customer.public_id),
-                "employee": str(self.seller_employee.public_id),
-                "payment_method": str(self.method.public_id),
+                "business_public_id": str(self.business_a.public_id),
+                "customer_public_id": str(self.customer.public_id),
+                "employee_public_id": str(self.seller_employee.public_id),
+                "payment_method_public_id": str(self.method.public_id),
                 "type": "sale",
                 "details": [{
-                    "product": str(self.product.public_id),
-                    "variant": str(variant.public_id),
+                    "product_public_id": str(self.product.public_id),
+                    "variant_public_id": str(variant.public_id),
                     "quantity": 3,
                 }],
             },

@@ -52,12 +52,12 @@ class RolePermissionTests(APITestCase):
 
     def sale_payload(self, employee):
         return {
-            "business": str(self.business.public_id),
-            "customer": str(self.customer.public_id),
-            "employee": str(employee.public_id),
-            "payment_method": str(self.method.public_id),
+            "business_public_id": str(self.business.public_id),
+            "customer_public_id": str(self.customer.public_id),
+            "employee_public_id": str(employee.public_id),
+            "payment_method_public_id": str(self.method.public_id),
             "type": "sale",
-            "details": [{"product": str(self.product.public_id), "quantity": 1}],
+            "details": [{"product_public_id": str(self.product.public_id), "quantity": 1}],
         }
 
     def test_owner_admin_inventory_can_create_product(self):

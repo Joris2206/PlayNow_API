@@ -19,23 +19,45 @@ from .models import (
 
 
 # ---------- Relaciones mediante public_id ----------
-def public_id_field(model, *, required=True, allow_null=False):
+def public_id_field(
+    model,
+    *,
+    source=None,
+    required=True,
+    allow_null=False,
+):
     """Campo relacional que recibe y devuelve el public_id (UUID)."""
+    kwargs = {
+        "slug_field": "public_id",
+        "queryset": model.objects.all(),
+        "required": required,
+        "allow_null": allow_null,
+    }
+
+    if source is not None:
+        kwargs["source"] = source
+
     return serializers.SlugRelatedField(
-        slug_field="public_id",
-        queryset=model.objects.all(),
-        required=required,
-        allow_null=allow_null,
+        **kwargs,
     )
 
 
-def public_id_read_only(*, allow_null=False):
+def public_id_read_only(
+    *,
+    source=None,
+    allow_null=False,
+):
     """Campo relacional de solo lectura representado por public_id."""
-    return serializers.SlugRelatedField(
-        slug_field="public_id",
-        read_only=True,
-        allow_null=allow_null,
-    )
+    kwargs = {
+        "slug_field": "public_id",
+        "read_only": True,
+        "allow_null": allow_null,
+    }
+
+    if source is not None:
+        kwargs["source"] = source
+
+    return serializers.SlugRelatedField(**kwargs)
 
 def related_name_field(
     source,
@@ -52,7 +74,7 @@ def get_active_status():
     active = EntityStatus.objects.filter(name__iexact="Activo").first()
     if active is None:
         raise serializers.ValidationError({
-            "status": (
+            "status_public_id": (
                 "No existe el estado inicial 'Activo'. "
                 "Ejecuta el comando seed_statuses."
             )
@@ -217,17 +239,24 @@ class PaymentMethodSerializer(
     DefaultActiveStatusMixin,
     serializers.ModelSerializer,
 ):
-    business = public_id_field(Business)
-    status = public_id_field(EntityStatus, required=False)
+    business_public_id = public_id_field(
+        Business,
+        source="business",
+    )
+    status_public_id = public_id_field(
+        EntityStatus,
+        source="status",
+        required=False,
+    )
     status_name = related_name_field("status.name")
 
     class Meta:
         model = PaymentMethod
         fields = (
             "public_id",
-            "business",
+            "business_public_id",
             "name",
-            "status",
+            "status_public_id",
             "status_name",
         )
         read_only_fields = ("public_id",)
@@ -236,7 +265,11 @@ class BusinessSerializer(
     DefaultActiveStatusMixin,
     serializers.ModelSerializer,
 ):
-    status = public_id_field(EntityStatus, required=False)
+    status_public_id = public_id_field(
+        EntityStatus,
+        source="status",
+        required=False,
+    )
     status_name = related_name_field("status.name")
     class Meta:
         model = Business
@@ -245,7 +278,7 @@ class BusinessSerializer(
             "business_name",
             "description",
             "currency",
-            "status",
+            "status_public_id",
             "status_name",
             "created_at",
             "updated_at",
@@ -261,12 +294,17 @@ class BusinessMembershipSerializer(serializers.ModelSerializer):
         source="user.email",
         read_only=True,
     )
-    business = public_id_read_only()
+    business_public_id = public_id_read_only(
+        source="business",
+    )
     business_name = serializers.CharField(
         source="business.business_name",
         read_only=True,
     )
-    employee = public_id_read_only(allow_null=True)
+    employee_public_id = public_id_read_only(
+        source="employee",
+        allow_null=True,
+    )
     employee_name = serializers.CharField(
         source="employee.full_name",
         read_only=True,
@@ -282,9 +320,9 @@ class BusinessMembershipSerializer(serializers.ModelSerializer):
         fields = (
             "public_id",
             "user_email",
-            "business",
+            "business_public_id",
             "business_name",
-            "employee",
+            "employee_public_id",
             "employee_name",
             "role",
             "role_display",
@@ -431,16 +469,23 @@ class ProductCategorySerializer(
     DefaultActiveStatusMixin,
     serializers.ModelSerializer,
 ):
-    business = public_id_field(Business)
-    status = public_id_field(EntityStatus, required=False)
+    business_public_id = public_id_field(
+        Business,
+        source="business",
+    )
+    status_public_id = public_id_field(
+        EntityStatus,
+        source="status",
+        required=False,
+    )
     status_name = related_name_field("status.name")
     class Meta:
         model = ProductCategory
         fields = (
             "public_id",
-            "business",
+            "business_public_id",
             "name",
-            "status",
+            "status_public_id",
             "status_name",
             "created_at",
             "updated_at",
@@ -455,22 +500,16 @@ class ProductSerializer(
     DefaultActiveStatusMixin,
     serializers.ModelSerializer,
 ):
-    business_public_id = (
-        serializers.SlugRelatedField(
-            source="business",
-            slug_field="public_id",
-            queryset=Business.objects.all(),
-        )
+    business_public_id = public_id_field(
+        Business,
+        source="business",
     )
 
-    category_public_id = (
-        serializers.SlugRelatedField(
-            source="category",
-            slug_field="public_id",
-            queryset=ProductCategory.objects.all(),
-            required=False,
-            allow_null=True,
-        )
+    category_public_id = public_id_field(
+        ProductCategory,
+        source="category",
+        required=False,
+        allow_null=True,
     )
 
     category_name = serializers.CharField(
@@ -479,13 +518,10 @@ class ProductSerializer(
         allow_null=True,
     )
 
-    status_public_id = (
-        serializers.SlugRelatedField(
-            source="status",
-            slug_field="public_id",
-            queryset=EntityStatus.objects.all(),
-            required=False,
-        )
+    status_public_id = public_id_field(
+        EntityStatus,
+        source="status",
+        required=False,
     )
 
     status_name = serializers.CharField(
@@ -543,7 +579,7 @@ class ProductSerializer(
             and category.business_id != business.id
         ):
             raise serializers.ValidationError({
-                "category": (
+                "category_public_id": (
                     "La categoría no pertenece al negocio seleccionado."
                 )
             })
@@ -554,18 +590,25 @@ class ProductVariantTypeSerializer(
     DefaultActiveStatusMixin,
     serializers.ModelSerializer,
 ):
-    product = public_id_field(Product)
+    product_public_id = public_id_field(
+        Product,
+        source="product",
+    )
     product_name= related_name_field("product.title")
-    status = public_id_field(EntityStatus, required=False)
+    status_public_id = public_id_field(
+        EntityStatus,
+        source="status",
+        required=False,
+    )
     status_name = related_name_field("status.name")
     class Meta:
         model = ProductVariantType
         fields = (
             "public_id",
-            "product",
+            "product_public_id",
             "product_name",
             "name",
-            "status",
+            "status_public_id",
             "status_name",
             "created_at",
             "updated_at",
@@ -580,21 +623,28 @@ class ProductVariantSerializer(
     DefaultActiveStatusMixin,
     serializers.ModelSerializer,
 ):
-    variant_type = public_id_field(ProductVariantType)
+    variant_type_public_id = public_id_field(
+        ProductVariantType,
+        source="variant_type",
+    )
     variant_type_name = related_name_field("variant_type.name")
-    status = public_id_field(EntityStatus, required=False)
+    status_public_id = public_id_field(
+        EntityStatus,
+        source="status",
+        required=False,
+    )
     status_name = related_name_field("status.name")
     product_name = related_name_field("variant_type.product.title")
     class Meta:
         model = ProductVariant
         fields = (
             "public_id",
-            "variant_type",
+            "variant_type_public_id",
             "variant_type_name",
             "label",
             "additional_price",
             "stock",
-            "status",
+            "status_public_id",
             "status_name",
             "product_name",
             "created_at",
@@ -610,12 +660,19 @@ class EmployeeSerializer(
     DefaultActiveStatusMixin,
     serializers.ModelSerializer,
 ):
-    business = public_id_field(Business)
-    status = public_id_field(EntityStatus, required=False)
+    business_public_id = public_id_field(
+        Business,
+        source="business",
+    )
+    status_public_id = public_id_field(
+        EntityStatus,
+        source="status",
+        required=False,
+    )
     status_name = related_name_field("status.name")
     class Meta:
         model = Employee
-        fields = ("public_id", "business", "full_name", "phone", "email", "position", "status", "status_name", "created_at", "updated_at")
+        fields = ("public_id", "business_public_id", "full_name", "phone", "email", "position", "status_public_id", "status_name", "created_at", "updated_at")
         read_only_fields = (
             "public_id",
             "created_at",
@@ -626,12 +683,19 @@ class CustomerSerializer(
     DefaultActiveStatusMixin,
     serializers.ModelSerializer,
 ):
-    business = public_id_field(Business)
-    status = public_id_field(EntityStatus, required=False)
+    business_public_id = public_id_field(
+        Business,
+        source="business",
+    )
+    status_public_id = public_id_field(
+        EntityStatus,
+        source="status",
+        required=False,
+    )
     status_name = related_name_field("status.name")
     class Meta:
         model = Customer
-        fields = ("public_id", "business", "full_name", "phone", "email", "status", "status_name", "created_at", "updated_at")
+        fields = ("public_id", "business_public_id", "full_name", "phone", "email", "status_public_id", "status_name", "created_at", "updated_at")
         read_only_fields = (
             "public_id",
             "created_at",
@@ -642,12 +706,19 @@ class SupplierSerializer(
     DefaultActiveStatusMixin,
     serializers.ModelSerializer,
 ):
-    business = public_id_field(Business)
-    status = public_id_field(EntityStatus, required=False)
+    business_public_id = public_id_field(
+        Business,
+        source="business",
+    )
+    status_public_id = public_id_field(
+        EntityStatus,
+        source="status",
+        required=False,
+    )
     status_name = related_name_field("status.name")
     class Meta:
         model = Supplier
-        fields = ("public_id", "business", "name", "phone", "email", "status", "status_name", "created_at", "updated_at")
+        fields = ("public_id", "business_public_id", "name", "phone", "email", "status_public_id", "status_name", "created_at", "updated_at")
         read_only_fields = (
             "public_id",
             "created_at",
@@ -657,12 +728,14 @@ class SupplierSerializer(
 class TransactionDetailSerializer(
     serializers.ModelSerializer
 ):
-    product = public_id_field(
-        Product
+    product_public_id = public_id_field(
+        Product,
+        source="product",
     )
 
-    variant = public_id_field(
+    variant_public_id = public_id_field(
         ProductVariant,
+        source="variant",
         required=False,
         allow_null=True,
     )
@@ -695,9 +768,9 @@ class TransactionDetailSerializer(
 
         fields = (
             "public_id",
-            "product",
+            "product_public_id",
             "product_name",
-            "variant",
+            "variant_public_id",
             "variant_name",
             "quantity",
             "unit_price",
@@ -714,29 +787,37 @@ class TransactionDetailSerializer(
 class TransactionSerializer(
     serializers.ModelSerializer
 ):
-    business = public_id_field(Business)
-    customer = public_id_field(
+    business_public_id = public_id_field(
+        Business,
+        source="business",
+    )
+    customer_public_id = public_id_field(
         Customer,
+        source="customer",
         required=False,
         allow_null=True,
     )
-    supplier = public_id_field(
+    supplier_public_id = public_id_field(
         Supplier,
+        source="supplier",
         required=False,
         allow_null=True,
     )
-    employee = public_id_field(
-        Employee, 
-        required=False, 
+    employee_public_id = public_id_field(
+        Employee,
+        source="employee",
+        required=False,
         allow_null=True
     )
-    payment_method = public_id_field(
+    payment_method_public_id = public_id_field(
         PaymentMethod,
+        source="payment_method",
         required=False,
         allow_null=True,
     )
-    status = public_id_field(
+    status_public_id = public_id_field(
         EntityStatus,
+        source="status",
         required=False,
     )
 
@@ -806,15 +887,15 @@ class TransactionSerializer(
         model = Transaction
         fields = (
             "public_id",
-            "business",
+            "business_public_id",
             "business_name",
-            "customer",
+            "customer_public_id",
             "customer_name",
-            "supplier",
+            "supplier_public_id",
             "supplier_name",
-            "employee",
+            "employee_public_id",
             "employee_name",
-            "payment_method",
+            "payment_method_public_id",
             "payment_method_name",
             "type",
             "is_debt",
@@ -822,7 +903,7 @@ class TransactionSerializer(
             "concept",
             "total_value",
             "expense_amount",
-            "status",
+            "status_public_id",
             "status_name",
             "invoice_number",
             "payment_status",
@@ -876,7 +957,7 @@ class TransactionSerializer(
 
         if business is None:
             raise serializers.ValidationError({
-                "business": (
+                "business_public_id": (
                     "Este campo es requerido."
                 )
             })
@@ -895,7 +976,7 @@ class TransactionSerializer(
             and employee is None
         ):
             raise serializers.ValidationError({
-                "employee": (
+                "employee_public_id": (
                     "Debe indicar el empleado al que "
                     "pertenece la venta."
                 )
@@ -962,7 +1043,7 @@ class TransactionSerializer(
 
             if obj.business_id != business.id:
                 raise serializers.ValidationError({
-                    field: (
+                    f"{field}_public_id": (
                         f"El recurso indicado en {field} "
                         "no pertenece al negocio "
                         "seleccionado."
@@ -1264,7 +1345,7 @@ class TransactionSerializer(
             != instance.business_id
         ):
             raise serializers.ValidationError({
-                "business": (
+                "business_public_id": (
                     "No se puede cambiar el negocio "
                     "de una transacción existente."
                 )
@@ -1355,7 +1436,7 @@ class TransactionSerializer(
 
         if active_status is None:
             raise serializers.ValidationError({
-                "status": (
+                "status_public_id": (
                     'No existe el estado "Activo".'
                 )
             })
@@ -1457,7 +1538,10 @@ class TransactionSerializer(
 
 # ---------- Pagos de Deuda ----------
 class DebtSerializer(serializers.ModelSerializer):
-    transaction = public_id_field(Transaction)
+    transaction_public_id = public_id_field(
+        Transaction,
+        source="transaction",
+    )
     customer_name = related_name_field("transaction.customer.full_name", allow_null=True)
     supplier_name = related_name_field("transaction.supplier.name", allow_null=True)
     transaction_type = related_name_field("transaction.type")
@@ -1465,7 +1549,7 @@ class DebtSerializer(serializers.ModelSerializer):
         model = Debt
         fields = (
             "public_id",
-            "transaction",
+            "transaction_public_id",
             "total_amount",
             "paid_amount",
             "interest_rate",
@@ -1486,19 +1570,26 @@ class DebtSerializer(serializers.ModelSerializer):
         )
 
 class DebtPaymentSerializer(serializers.ModelSerializer):
-    debt = public_id_field(Debt)
-    payment_method = public_id_field(PaymentMethod)
+    debt_public_id = public_id_field(
+        Debt,
+        source="debt",
+    )
+    payment_method_public_id = public_id_field(
+        PaymentMethod,
+        source="payment_method",
+    )
     payment_method_name = related_name_field("payment_method.name")
     customer_name = related_name_field("debt.transaction.customer.full_name", allow_null=True)
     supplier_name = related_name_field("debt.transaction.supplier.name", allow_null=True)
-    transaction = public_id_field(
+    transaction_public_id = public_id_field(
         Transaction,
+        source="transaction",
         required=False,
         allow_null=True,
     )
     class Meta:
         model = DebtPayment
-        fields = ("public_id", "debt", "amount", "payment_date", "payment_method", "payment_method_name", "customer_name", "supplier_name", "transaction", "created_at", "updated_at")
+        fields = ("public_id", "debt_public_id", "amount", "payment_date", "payment_method_public_id", "payment_method_name", "customer_name", "supplier_name", "transaction_public_id", "created_at", "updated_at")
         read_only_fields = ("public_id", "created_at", "updated_at")
 
     def validate(self, attrs):
@@ -1524,7 +1615,7 @@ class DebtPaymentSerializer(serializers.ModelSerializer):
             != debt.transaction.business_id
         ):
             raise serializers.ValidationError({
-                "payment_method": (
+                "payment_method_public_id": (
                     "El método de pago no pertenece "
                     "al negocio de la deuda."
                 )
@@ -1559,7 +1650,7 @@ class DebtPaymentSerializer(serializers.ModelSerializer):
             != debt.transaction.business_id
         ):
             raise serializers.ValidationError({
-                "transaction": (
+                "transaction_public_id": (
                     "La transacción del pago no pertenece "
                     "al mismo negocio de la deuda."
                 )
@@ -1591,21 +1682,30 @@ class DebtPaymentSerializer(serializers.ModelSerializer):
 
 # ---------- Notificaciones / Recordatorios ----------
 class NotificationSerializer(serializers.ModelSerializer):
+    user_public_id = public_id_read_only(
+        source="user",
+    )
     user_email = serializers.EmailField(
         source="user.email",
         read_only=True,
     )
-    business = public_id_field(
+    business_public_id = public_id_field(
         Business,
+        source="business",
         required=False,
         allow_null=True,
     )
-    transaction = public_id_field(
+    transaction_public_id = public_id_field(
         Transaction,
+        source="transaction",
         required=False,
         allow_null=True,
     )
-    status = public_id_field(EntityStatus, required=False)
+    status_public_id = public_id_field(
+        EntityStatus,
+        source="status",
+        required=False,
+    )
     status_name = related_name_field("status.name")
     class Meta:
         model = Notification
@@ -1614,13 +1714,13 @@ class NotificationSerializer(serializers.ModelSerializer):
             "title",
             "message",
             "type",
-            "user",
+            "user_public_id",
             "user_email",
-            "business",
-            "transaction",
+            "business_public_id",
+            "transaction_public_id",
             "is_read",
             "sent_at",
-            "status",
+            "status_public_id",
             "status_name",
             "scheduled_at",
             "created_at",
@@ -1628,7 +1728,7 @@ class NotificationSerializer(serializers.ModelSerializer):
         )
         read_only_fields = (
             "public_id",
-            "user",
+            "user_public_id",
             "user_email",
             "sent_at",
             "created_at",
@@ -1651,7 +1751,7 @@ class NotificationSerializer(serializers.ModelSerializer):
             and transaction.business_id != business.id
         ):
             raise serializers.ValidationError({
-                "transaction": (
+                "transaction_public_id": (
                     "La transacción no pertenece al negocio seleccionado."
                 )
             })
@@ -1659,17 +1759,26 @@ class NotificationSerializer(serializers.ModelSerializer):
         return attrs
 
 class ReminderSerializer(serializers.ModelSerializer):
-    business = public_id_field(
+    user_public_id = public_id_read_only(
+        source="user",
+    )
+    business_public_id = public_id_field(
         Business,
+        source="business",
         required=False,
         allow_null=True,
     )
-    transaction = public_id_field(
+    transaction_public_id = public_id_field(
         Transaction,
+        source="transaction",
         required=False,
         allow_null=True,
     )
-    status = public_id_field(EntityStatus, required=False)
+    status_public_id = public_id_field(
+        EntityStatus,
+        source="status",
+        required=False,
+    )
     status_name = related_name_field("status.name")
     class Meta:
         model = Reminder
@@ -1679,17 +1788,17 @@ class ReminderSerializer(serializers.ModelSerializer):
             "description",
             "due_date",
             "is_completed",
-            "user",
-            "business",
-            "transaction",
-            "status",
+            "user_public_id",
+            "business_public_id",
+            "transaction_public_id",
+            "status_public_id",
             "status_name",
             "created_at",
             "updated_at",
         )
         read_only_fields = (
             "public_id",
-            "user",
+            "user_public_id",
             "created_at",
             "updated_at",
         )
@@ -1710,7 +1819,7 @@ class ReminderSerializer(serializers.ModelSerializer):
             and transaction.business_id != business.id
         ):
             raise serializers.ValidationError({
-                "transaction": (
+                "transaction_public_id": (
                     "La transacción no pertenece al negocio seleccionado."
                 )
             })
@@ -1718,16 +1827,26 @@ class ReminderSerializer(serializers.ModelSerializer):
         return attrs
 
 class BudgetSerializer(serializers.ModelSerializer):
-    business = public_id_field(Business)
-    status = public_id_field(EntityStatus, required=False)
+    user_public_id = public_id_read_only(
+        source="user",
+    )
+    business_public_id = public_id_field(
+        Business,
+        source="business",
+    )
+    status_public_id = public_id_field(
+        EntityStatus,
+        source="status",
+        required=False,
+    )
     status_name = related_name_field("status.name")
     class Meta:
         model = Budget
         fields = (
             "public_id",
-            "user",
-            "business",
-            "status",
+            "user_public_id",
+            "business_public_id",
+            "status_public_id",
             "status_name",
             "period_start",
             "period_end",
@@ -1738,7 +1857,7 @@ class BudgetSerializer(serializers.ModelSerializer):
         )
         read_only_fields = (
             "public_id",
-            "user",
+            "user_public_id",
             "created_at",
             "updated_at",
         )
@@ -1767,20 +1886,30 @@ class BudgetSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 class GoalSerializer(serializers.ModelSerializer):
-    business = public_id_field(Business)
-    status = public_id_field(EntityStatus, required=False)
+    user_public_id = public_id_read_only(
+        source="user",
+    )
+    business_public_id = public_id_field(
+        Business,
+        source="business",
+    )
+    status_public_id = public_id_field(
+        EntityStatus,
+        source="status",
+        required=False,
+    )
     status_name = related_name_field("status.name")
     class Meta:
         model = Goal
         fields = (
             "public_id",
-            "user",
-            "business",
+            "user_public_id",
+            "business_public_id",
             "name",
             "description",
             "target_amount",
             "current_amount",
-            "status",
+            "status_public_id",
             "status_name",
             "start_date",
             "end_date",
@@ -1790,7 +1919,7 @@ class GoalSerializer(serializers.ModelSerializer):
         )
         read_only_fields = (
             "public_id",
-            "user",
+            "user_public_id",
             "current_amount",
             "is_completed",
             "created_at",
@@ -1817,21 +1946,26 @@ class GoalSerializer(serializers.ModelSerializer):
         return attrs
 
 class GoalProgressSerializer(serializers.ModelSerializer):
-    goal = public_id_field(Goal)
+    goal_public_id = public_id_field(
+        Goal,
+        source="goal",
+    )
     goal_name = related_name_field("goal.name")
-    transaction = public_id_field(
+    transaction_public_id = public_id_field(
         Transaction,
+        source="transaction",
         required=False,
         allow_null=True,
     )
-    status = public_id_field(
+    status_public_id = public_id_field(
         EntityStatus,
+        source="status",
         required=False,
     )
     status_name = related_name_field("status.name")
     class Meta:
         model = GoalProgress
-        fields = ("public_id", "goal", "goal_name", "amount", "transaction", "status", "status_name", "note",
+        fields = ("public_id", "goal_public_id", "goal_name", "amount", "transaction_public_id", "status_public_id", "status_name", "note",
                   "created_at", "updated_at")
 
     def validate(self, attrs):
@@ -1850,7 +1984,7 @@ class GoalProgressSerializer(serializers.ModelSerializer):
             and transaction.business_id != goal.business_id
         ):
             raise serializers.ValidationError({
-                "transaction": (
+                "transaction_public_id": (
                     "La transacción no pertenece al negocio de la meta."
                 )
             })
@@ -1885,8 +2019,9 @@ class GoalProgressSerializer(serializers.ModelSerializer):
 class EmployeeCommissionPlanSerializer(
     serializers.ModelSerializer
 ):
-    employee = public_id_field(
-        Employee
+    employee_public_id = public_id_field(
+        Employee,
+        source="employee",
     )
 
     employee_name = serializers.CharField(
@@ -1894,7 +2029,7 @@ class EmployeeCommissionPlanSerializer(
         read_only=True,
     )
 
-    business = serializers.SlugRelatedField(
+    business_public_id = serializers.SlugRelatedField(
         source="employee.business",
         slug_field="public_id",
         read_only=True,
@@ -1905,8 +2040,8 @@ class EmployeeCommissionPlanSerializer(
 
         fields = (
             "public_id",
-            "business",
-            "employee",
+            "business_public_id",
+            "employee_public_id",
             "employee_name",
             "percentage",
             "valid_from",
@@ -1918,7 +2053,7 @@ class EmployeeCommissionPlanSerializer(
 
         read_only_fields = (
             "public_id",
-            "business",
+            "business_public_id",
             "employee_name",
             "created_at",
             "updated_at",
@@ -2028,7 +2163,9 @@ class EmployeeCommissionPlanSerializer(
 class CommissionSettlementSerializer(
     serializers.ModelSerializer
 ):
-    employee = public_id_read_only()
+    employee_public_id = public_id_read_only(
+        source="employee",
+    )
 
     employee_name = serializers.CharField(
         source="employee.full_name",
@@ -2042,7 +2179,7 @@ class CommissionSettlementSerializer(
         )
     )
 
-    business = serializers.SlugRelatedField(
+    business_public_id = serializers.SlugRelatedField(
         source="employee.business",
         slug_field="public_id",
         read_only=True,
@@ -2055,7 +2192,8 @@ class CommissionSettlementSerializer(
         )
     )
 
-    created_by = serializers.SlugRelatedField(
+    created_by_public_id = serializers.SlugRelatedField(
+        source="created_by",
         slug_field="public_id",
         read_only=True,
     )
@@ -2070,9 +2208,9 @@ class CommissionSettlementSerializer(
 
         fields = (
             "public_id",
-            "business",
+            "business_public_id",
             "business_currency",
-            "employee",
+            "employee_public_id",
             "employee_name",
             "employee_position",
             "period_start",
@@ -2088,7 +2226,7 @@ class CommissionSettlementSerializer(
             "remaining_advance_balance",
             "status",
             "paid_at",
-            "created_by",
+            "created_by_public_id",
             "created_by_name",
             "created_at",
             "updated_at",
@@ -2099,8 +2237,9 @@ class CommissionSettlementSerializer(
 class CommissionSettlementCreateSerializer(
     serializers.Serializer
 ):
-    employee = public_id_field(
-        Employee
+    employee_public_id = public_id_field(
+        Employee,
+        source="employee",
     )
 
     period_start = serializers.DateField()
@@ -2312,18 +2451,23 @@ class CommissionSettlementCreateSerializer(
 class CashRegisterSerializer(
     serializers.ModelSerializer
 ):
-    business = public_id_read_only()
-    employee = public_id_read_only(
+    business_public_id = public_id_read_only(
+        source="business",
+    )
+    employee_public_id = public_id_read_only(
+        source="employee",
         allow_null=True,
     )
 
-    opened_by = serializers.SlugRelatedField(
+    opened_by_public_id = serializers.SlugRelatedField(
+        source="opened_by",
         slug_field="public_id",
         read_only=True,
         allow_null=True,
     )
 
-    closed_by = serializers.SlugRelatedField(
+    closed_by_public_id = serializers.SlugRelatedField(
+        source="closed_by",
         slug_field="public_id",
         read_only=True,
         allow_null=True,
@@ -2358,15 +2502,15 @@ class CashRegisterSerializer(
         fields = (
             "public_id",
 
-            "business",
+            "business_public_id",
             "business_currency",
 
-            "employee",
+            "employee_public_id",
             "employee_name",
 
-            "opened_by",
+            "opened_by_public_id",
             "opened_by_name",
-            "closed_by",
+            "closed_by_public_id",
             "closed_by_name",
 
             "open_time",
@@ -2391,12 +2535,14 @@ class CashRegisterSerializer(
 class CashRegisterOpenSerializer(
     serializers.ModelSerializer
 ):
-    business = public_id_field(
-        Business
+    business_public_id = public_id_field(
+        Business,
+        source="business",
     )
 
-    employee = public_id_field(
-        Employee
+    employee_public_id = public_id_field(
+        Employee,
+        source="employee",
     )
 
     opening_balance = serializers.DecimalField(
@@ -2414,8 +2560,8 @@ class CashRegisterOpenSerializer(
         model = CashRegister
 
         fields = (
-            "business",
-            "employee",
+            "business_public_id",
+            "employee_public_id",
             "opening_balance",
             "opening_notes",
         )
@@ -2426,7 +2572,7 @@ class CashRegisterOpenSerializer(
 
         if employee.business_id != business.id:
             raise serializers.ValidationError({
-                "employee": (
+                "employee_public_id": (
                     "El empleado debe pertenecer "
                     "al negocio seleccionado."
                 )
@@ -2443,7 +2589,7 @@ class CashRegisterOpenSerializer(
 
         if open_register_exists:
             raise serializers.ValidationError({
-                "business": (
+                "business_public_id": (
                     "Este negocio ya tiene una "
                     "caja abierta."
                 )
@@ -2469,23 +2615,27 @@ class CashRegisterCloseSerializer(
 class CashMovementSerializer(
     serializers.ModelSerializer
 ):
-    cash_register = public_id_field(
-        CashRegister
+    cash_register_public_id = public_id_field(
+        CashRegister,
+        source="cash_register",
     )
 
-    employee = public_id_field(
+    employee_public_id = public_id_field(
         Employee,
+        source="employee",
         required=False,
         allow_null=True,
     )
 
-    payment_method = public_id_field(
+    payment_method_public_id = public_id_field(
         PaymentMethod,
+        source="payment_method",
         required=False,
         allow_null=True,
     )
 
-    created_by = serializers.SlugRelatedField(
+    created_by_public_id = serializers.SlugRelatedField(
+        source="created_by",
         slug_field="public_id",
         read_only=True,
     )
@@ -2495,7 +2645,7 @@ class CashMovementSerializer(
         read_only=True,
     )
 
-    business = serializers.SlugRelatedField(
+    business_public_id = serializers.SlugRelatedField(
         source="cash_register.business",
         slug_field="public_id",
         read_only=True,
@@ -2536,15 +2686,15 @@ class CashMovementSerializer(
         fields = (
             "public_id",
 
-            "cash_register",
+            "cash_register_public_id",
             "cash_register_status",
 
-            "business",
+            "business_public_id",
 
-            "employee",
+            "employee_public_id",
             "employee_name",
 
-            "payment_method",
+            "payment_method_public_id",
             "payment_method_name",
 
             "movement_type",
@@ -2552,7 +2702,7 @@ class CashMovementSerializer(
             "signed_amount",
             "note",
 
-            "created_by",
+            "created_by_public_id",
             "created_by_name",
             "created_at",
         )
@@ -2560,11 +2710,11 @@ class CashMovementSerializer(
         read_only_fields = (
             "public_id",
             "cash_register_status",
-            "business",
+            "business_public_id",
             "employee_name",
             "payment_method_name",
             "signed_amount",
-            "created_by",
+            "created_by_public_id",
             "created_by_name",
             "created_at",
         )
@@ -2610,7 +2760,7 @@ class CashMovementSerializer(
 
         if cash_register is None:
             raise serializers.ValidationError({
-                "cash_register": (
+                "cash_register_public_id": (
                     "Debes indicar una caja."
                 )
             })
@@ -2620,7 +2770,7 @@ class CashMovementSerializer(
             != CashRegister.STATUS_OPEN
         ):
             raise serializers.ValidationError({
-                "cash_register": (
+                "cash_register_public_id": (
                     "No se pueden registrar "
                     "movimientos en una caja cerrada."
                 )
@@ -2632,7 +2782,7 @@ class CashMovementSerializer(
             != cash_register.business_id
         ):
             raise serializers.ValidationError({
-                "employee": (
+                "employee_public_id": (
                     "El empleado no pertenece al "
                     "negocio de la caja."
                 )
@@ -2644,7 +2794,7 @@ class CashMovementSerializer(
             != cash_register.business_id
         ):
             raise serializers.ValidationError({
-                "payment_method": (
+                "payment_method_public_id": (
                     "El método de pago no pertenece "
                     "al negocio de la caja."
                 )
@@ -2660,7 +2810,7 @@ class CashMovementSerializer(
             and employee is None
         ):
             raise serializers.ValidationError({
-                "employee": (
+                "employee_public_id": (
                     "Debes indicar el empleado para "
                     "este tipo de movimiento."
                 )
@@ -2686,8 +2836,9 @@ class MonthlySummaryQuerySerializer(
 class MonthlyClosureCreateSerializer(
     serializers.Serializer
 ):
-    business = public_id_field(
-        Business
+    business_public_id = public_id_field(
+        Business,
+        source="business",
     )
 
     year = serializers.IntegerField(
@@ -2712,7 +2863,9 @@ class MonthlyClosureReopenSerializer(
 class MonthlyClosureSerializer(
     serializers.ModelSerializer
 ):
-    business = public_id_read_only()
+    business_public_id = public_id_read_only(
+        source="business",
+    )
 
     business_name = serializers.CharField(
         source="business.business_name",
@@ -2726,7 +2879,8 @@ class MonthlyClosureSerializer(
         )
     )
 
-    closed_by = serializers.SlugRelatedField(
+    closed_by_public_id = serializers.SlugRelatedField(
+        source="closed_by",
         slug_field="public_id",
         read_only=True,
     )
@@ -2736,7 +2890,8 @@ class MonthlyClosureSerializer(
         read_only=True,
     )
 
-    reopened_by = serializers.SlugRelatedField(
+    reopened_by_public_id = serializers.SlugRelatedField(
+        source="reopened_by",
         slug_field="public_id",
         read_only=True,
         allow_null=True,
@@ -2753,7 +2908,7 @@ class MonthlyClosureSerializer(
 
         fields = (
             "public_id",
-            "business",
+            "business_public_id",
             "business_name",
             "business_currency",
             "year",
@@ -2761,10 +2916,10 @@ class MonthlyClosureSerializer(
             "version",
             "status",
             "summary",
-            "closed_by",
+            "closed_by_public_id",
             "closed_by_name",
             "closed_at",
-            "reopened_by",
+            "reopened_by_public_id",
             "reopened_by_name",
             "reopened_at",
             "reopen_reason",
@@ -2840,13 +2995,24 @@ class SupplierSummaryQuerySerializer(
 
 # ---------- Lecturas (solo por si las quieres exponer) ----------
 class StockMovementSerializer(serializers.ModelSerializer):
-    product = public_id_read_only()
+    product_public_id = public_id_read_only(
+        source="product",
+    )
     product_name = related_name_field("product.title")
-    variant = public_id_read_only(allow_null=True)
+    variant_public_id = public_id_read_only(
+        source="variant",
+        allow_null=True,
+    )
     variant_name = related_name_field("variant.label", allow_null=True)
     variant_type_name = related_name_field("variant.variant_type.name", allow_null=True)
-    transaction = public_id_read_only(allow_null=True)
-    transaction_detail = public_id_read_only(allow_null=True)
+    transaction_public_id = public_id_read_only(
+        source="transaction",
+        allow_null=True,
+    )
+    transaction_detail_public_id = public_id_read_only(
+        source="transaction_detail",
+        allow_null=True,
+    )
     created_by_email = serializers.EmailField(
         source="created_by.email",
         read_only=True,
@@ -2857,13 +3023,13 @@ class StockMovementSerializer(serializers.ModelSerializer):
         model = StockMovement
         fields = (
             "public_id",
-            "product",
+            "product_public_id",
             "product_name",
-            "variant",
+            "variant_public_id",
             "variant_name",
             "variant_type_name",
-            "transaction",
-            "transaction_detail",
+            "transaction_public_id",
+            "transaction_detail_public_id",
             "note",
             "type",
             "quantity",

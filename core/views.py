@@ -8,7 +8,14 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, PermissionDenied
 from rest_framework.generics import GenericAPIView
-from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiExample, OpenApiResponse
+from drf_spectacular.utils import (
+    OpenApiExample,
+    OpenApiParameter,
+    OpenApiResponse,
+    OpenApiTypes,
+    extend_schema,
+    extend_schema_view,
+)
 from django_filters import rest_framework as filters
 from core.services.customer_supplier_reports import build_customers_summary, build_suppliers_summary
 from core.services.dashboard import build_dashboard_overview
@@ -74,9 +81,37 @@ CATEGORY_PUBLIC_ID = "4276b1bb-82fc-4806-9a5c-de70002e8e41"
 PRODUCT_PUBLIC_ID = "7aa19d16-1915-4cfa-8658-3b967e198c70"
 VARIANT_TYPE_PUBLIC_ID = "664de038-94c0-451c-969f-1ac5c93c6220"
 VARIANT_PUBLIC_ID = "c5067b51-b848-4c5e-98dc-b2cfcf6d63db"
+EMPLOYEE_PUBLIC_ID = "c9fc2d2d-148d-4ab7-9b24-a94389cf0c74"
 CUSTOMER_PUBLIC_ID = "eb659af9-b488-4562-85cb-c4b4130aa607"
 SUPPLIER_PUBLIC_ID = "e4069f25-0208-4094-9609-d7e40db38b27"
 PAYMENT_METHOD_PUBLIC_ID = "9f98c592-fc72-4649-8c39-a1540c895737"
+
+EMPLOYEE_PERIOD_QUERY_PARAMETERS = [
+    OpenApiParameter(
+        name="business_public_id",
+        type=OpenApiTypes.UUID,
+        location=OpenApiParameter.QUERY,
+        required=True,
+    ),
+    OpenApiParameter(
+        name="employee_public_id",
+        type=OpenApiTypes.UUID,
+        location=OpenApiParameter.QUERY,
+        required=True,
+    ),
+    OpenApiParameter(
+        name="date_from",
+        type=OpenApiTypes.DATE,
+        location=OpenApiParameter.QUERY,
+        required=True,
+    ),
+    OpenApiParameter(
+        name="date_to",
+        type=OpenApiTypes.DATE,
+        location=OpenApiParameter.QUERY,
+        required=True,
+    ),
+]
 TRANSACTION_PUBLIC_ID = "bcd85f11-e36d-4cac-94ca-b005f48843cf"
 DEBT_PUBLIC_ID = "4da69052-bb85-483b-aef8-ad3d14579a49"
 GOAL_PUBLIC_ID = "85af7d8e-8dc8-4616-8609-ce92df799ad6"
@@ -127,7 +162,7 @@ MEMBERSHIP_UPDATE_EXAMPLE = OpenApiExample(
 CATEGORY_CREATE_EXAMPLE = OpenApiExample(
     "Crear categoría",
     value={
-        "business": BUSINESS_PUBLIC_ID,
+        "business_public_id": BUSINESS_PUBLIC_ID,
         "name": "Calzado",
     },
     request_only=True,
@@ -136,8 +171,8 @@ CATEGORY_CREATE_EXAMPLE = OpenApiExample(
 PRODUCT_CREATE_EXAMPLE = OpenApiExample(
     "Crear producto",
     value={
-        "business": BUSINESS_PUBLIC_ID,
-        "category": CATEGORY_PUBLIC_ID,
+        "business_public_id": BUSINESS_PUBLIC_ID,
+        "category_public_id": CATEGORY_PUBLIC_ID,
         "title": "Zapato deportivo unisex",
         "description": "Zapato cómodo para uso diario.",
         "image_url": "https://example.com/images/zapato-deportivo.jpg",
@@ -152,7 +187,7 @@ PRODUCT_CREATE_EXAMPLE = OpenApiExample(
 VARIANT_TYPE_CREATE_EXAMPLE = OpenApiExample(
     "Crear tipo de variante",
     value={
-        "product": PRODUCT_PUBLIC_ID,
+        "product_public_id": PRODUCT_PUBLIC_ID,
         "name": "Talla",
     },
     request_only=True,
@@ -161,7 +196,7 @@ VARIANT_TYPE_CREATE_EXAMPLE = OpenApiExample(
 VARIANT_CREATE_EXAMPLE = OpenApiExample(
     "Crear variante",
     value={
-        "variant_type": VARIANT_TYPE_PUBLIC_ID,
+        "variant_type_public_id": VARIANT_TYPE_PUBLIC_ID,
         "label": "Talla 38",
         "additional_price": "0.00",
         "stock": 8,
@@ -172,7 +207,7 @@ VARIANT_CREATE_EXAMPLE = OpenApiExample(
 EMPLOYEE_CREATE_EXAMPLE = OpenApiExample(
     "Registrar empleado sin acceso al sistema",
     value={
-        "business": BUSINESS_PUBLIC_ID,
+        "business_public_id": BUSINESS_PUBLIC_ID,
         "full_name": "Ana Martínez",
         "phone": "7777-4321",
         "position": "Dependiente",
@@ -183,7 +218,7 @@ EMPLOYEE_CREATE_EXAMPLE = OpenApiExample(
 CUSTOMER_CREATE_EXAMPLE = OpenApiExample(
     "Registrar cliente",
     value={
-        "business": BUSINESS_PUBLIC_ID,
+        "business_public_id": BUSINESS_PUBLIC_ID,
         "full_name": "José Ramírez",
         "phone": "8666-1122",
         "email": "jose.ramirez@example.com",
@@ -194,7 +229,7 @@ CUSTOMER_CREATE_EXAMPLE = OpenApiExample(
 SUPPLIER_CREATE_EXAMPLE = OpenApiExample(
     "Registrar proveedor",
     value={
-        "business": BUSINESS_PUBLIC_ID,
+        "business_public_id": BUSINESS_PUBLIC_ID,
         "name": "Distribuidora Central",
         "phone": "2255-7788",
         "email": "ventas@distribuidoracentral.example.com",
@@ -205,7 +240,7 @@ SUPPLIER_CREATE_EXAMPLE = OpenApiExample(
 PAYMENT_METHOD_CREATE_EXAMPLE = OpenApiExample(
     "Crear método de pago",
     value={
-        "business": BUSINESS_PUBLIC_ID,
+        "business_public_id": BUSINESS_PUBLIC_ID,
         "name": "Transferencia bancaria",
     },
     request_only=True,
@@ -214,10 +249,11 @@ PAYMENT_METHOD_CREATE_EXAMPLE = OpenApiExample(
 TRANSACTION_SALE_EXAMPLE = OpenApiExample(
     "Venta pagada",
     value={
-        "business": BUSINESS_PUBLIC_ID,
-        "customer": CUSTOMER_PUBLIC_ID,
-        "supplier": None,
-        "payment_method": PAYMENT_METHOD_PUBLIC_ID,
+        "business_public_id": BUSINESS_PUBLIC_ID,
+        "customer_public_id": CUSTOMER_PUBLIC_ID,
+        "supplier_public_id": None,
+        "employee_public_id": EMPLOYEE_PUBLIC_ID,
+        "payment_method_public_id": PAYMENT_METHOD_PUBLIC_ID,
         "type": "sale",
         "discount_percent": "5.00",
         "concept": "Venta en mostrador",
@@ -227,8 +263,8 @@ TRANSACTION_SALE_EXAMPLE = OpenApiExample(
         "invoice_file_url": "",
         "details": [
             {
-                "product": PRODUCT_PUBLIC_ID,
-                "variant": VARIANT_PUBLIC_ID,
+                "product_public_id": PRODUCT_PUBLIC_ID,
+                "variant_public_id": VARIANT_PUBLIC_ID,
                 "quantity": 2,
                 "unit_price": "850.00",
             }
@@ -240,10 +276,10 @@ TRANSACTION_SALE_EXAMPLE = OpenApiExample(
 TRANSACTION_PURCHASE_EXAMPLE = OpenApiExample(
     "Compra de inventario",
     value={
-        "business": BUSINESS_PUBLIC_ID,
-        "customer": None,
-        "supplier": SUPPLIER_PUBLIC_ID,
-        "payment_method": PAYMENT_METHOD_PUBLIC_ID,
+        "business_public_id": BUSINESS_PUBLIC_ID,
+        "customer_public_id": None,
+        "supplier_public_id": SUPPLIER_PUBLIC_ID,
+        "payment_method_public_id": PAYMENT_METHOD_PUBLIC_ID,
         "type": "purchase",
         "discount_percent": "0.00",
         "concept": "Reposición semanal de inventario",
@@ -253,8 +289,8 @@ TRANSACTION_PURCHASE_EXAMPLE = OpenApiExample(
         "invoice_file_url": "",
         "details": [
             {
-                "product": PRODUCT_PUBLIC_ID,
-                "variant": VARIANT_PUBLIC_ID,
+                "product_public_id": PRODUCT_PUBLIC_ID,
+                "variant_public_id": VARIANT_PUBLIC_ID,
                 "quantity": 12,
                 "unit_price": "560.00",
             }
@@ -266,10 +302,10 @@ TRANSACTION_PURCHASE_EXAMPLE = OpenApiExample(
 TRANSACTION_EXPENSE_EXAMPLE = OpenApiExample(
     "Gasto general",
     value={
-        "business": BUSINESS_PUBLIC_ID,
-        "customer": None,
-        "supplier": None,
-        "payment_method": PAYMENT_METHOD_PUBLIC_ID,
+        "business_public_id": BUSINESS_PUBLIC_ID,
+        "customer_public_id": None,
+        "supplier_public_id": None,
+        "payment_method_public_id": PAYMENT_METHOD_PUBLIC_ID,
         "type": "expense",
         "discount_percent": "0.00",
         "concept": "Pago mensual de energía eléctrica",
@@ -285,8 +321,8 @@ TRANSACTION_EXPENSE_EXAMPLE = OpenApiExample(
 TRANSACTION_UPDATE_EXAMPLE = OpenApiExample(
     "Actualizar datos permitidos",
     value={
-        "customer": CUSTOMER_PUBLIC_ID,
-        "payment_method": PAYMENT_METHOD_PUBLIC_ID,
+        "customer_public_id": CUSTOMER_PUBLIC_ID,
+        "payment_method_public_id": PAYMENT_METHOD_PUBLIC_ID,
         "discount_percent": "5.00",
         "concept": "Venta corregida por solicitud del cliente",
         "invoice_number": "000145",
@@ -299,7 +335,7 @@ TRANSACTION_UPDATE_EXAMPLE = OpenApiExample(
 DEBT_CREATE_EXAMPLE = OpenApiExample(
     "Registrar deuda",
     value={
-        "transaction": TRANSACTION_PUBLIC_ID,
+        "transaction_public_id": TRANSACTION_PUBLIC_ID,
         "total_amount": "1700.00",
         "paid_amount": "0.00",
         "interest_rate": "0.00",
@@ -312,11 +348,11 @@ DEBT_CREATE_EXAMPLE = OpenApiExample(
 DEBT_PAYMENT_CREATE_EXAMPLE = OpenApiExample(
     "Abono a deuda",
     value={
-        "debt": DEBT_PUBLIC_ID,
+        "debt_public_id": DEBT_PUBLIC_ID,
         "amount": "500.00",
         "payment_date": "2026-07-30",
-        "payment_method": PAYMENT_METHOD_PUBLIC_ID,
-        "transaction": None,
+        "payment_method_public_id": PAYMENT_METHOD_PUBLIC_ID,
+        "transaction_public_id": None,
     },
     request_only=True,
 )
@@ -327,8 +363,8 @@ NOTIFICATION_CREATE_EXAMPLE = OpenApiExample(
         "title": "Stock bajo",
         "message": "El zapato deportivo talla 38 tiene solo 3 unidades.",
         "type": "warning",
-        "business": BUSINESS_PUBLIC_ID,
-        "transaction": None,
+        "business_public_id": BUSINESS_PUBLIC_ID,
+        "transaction_public_id": None,
         "is_read": False,
         "scheduled_at": None,
     },
@@ -342,8 +378,8 @@ REMINDER_CREATE_EXAMPLE = OpenApiExample(
         "description": "Confirmar la entrega del nuevo inventario.",
         "due_date": "2026-08-02",
         "is_completed": False,
-        "business": BUSINESS_PUBLIC_ID,
-        "transaction": None,
+        "business_public_id": BUSINESS_PUBLIC_ID,
+        "transaction_public_id": None,
     },
     request_only=True,
 )
@@ -351,8 +387,8 @@ REMINDER_CREATE_EXAMPLE = OpenApiExample(
 BUDGET_CREATE_EXAMPLE = OpenApiExample(
     "Crear presupuesto mensual",
     value={
-        "business": BUSINESS_PUBLIC_ID,
-        "status": STATUS_PUBLIC_ID,
+        "business_public_id": BUSINESS_PUBLIC_ID,
+        "status_public_id": STATUS_PUBLIC_ID,
         "period_start": "2026-08-01",
         "period_end": "2026-08-31",
         "allocated_amount": "50000.00",
@@ -364,7 +400,7 @@ BUDGET_CREATE_EXAMPLE = OpenApiExample(
 GOAL_CREATE_EXAMPLE = OpenApiExample(
     "Crear meta de ventas",
     value={
-        "business": BUSINESS_PUBLIC_ID,
+        "business_public_id": BUSINESS_PUBLIC_ID,
         "name": "Meta de ventas de agosto",
         "description": "Alcanzar cincuenta mil córdobas en ventas.",
         "target_amount": "50000.00",
@@ -377,10 +413,10 @@ GOAL_CREATE_EXAMPLE = OpenApiExample(
 GOAL_PROGRESS_CREATE_EXAMPLE = OpenApiExample(
     "Registrar avance de meta",
     value={
-        "goal": GOAL_PUBLIC_ID,
+        "goal_public_id": GOAL_PUBLIC_ID,
         "amount": "3500.00",
-        "transaction": TRANSACTION_PUBLIC_ID,
-        "status": STATUS_PUBLIC_ID,
+        "transaction_public_id": TRANSACTION_PUBLIC_ID,
+        "status_public_id": STATUS_PUBLIC_ID,
         "note": "Venta mayorista registrada.",
     },
     request_only=True,
@@ -3270,44 +3306,8 @@ class EmployeeSalesReportView(
             "Calcula las ventas correspondientes "
             "a un empleado dentro de un período."
         ),
-        parameters=[
-            {
-                "name": "business_public_id",
-                "required": True,
-                "in": "query",
-                "schema": {
-                    "type": "string",
-                    "format": "uuid",
-                },
-            },
-            {
-                "name": "employee_public_id",
-                "required": True,
-                "in": "query",
-                "schema": {
-                    "type": "string",
-                    "format": "uuid",
-                },
-            },
-            {
-                "name": "date_from",
-                "required": True,
-                "in": "query",
-                "schema": {
-                    "type": "string",
-                    "format": "date",
-                },
-            },
-            {
-                "name": "date_to",
-                "required": True,
-                "in": "query",
-                "schema": {
-                    "type": "string",
-                    "format": "date",
-                },
-            },
-        ],
+        parameters=EMPLOYEE_PERIOD_QUERY_PARAMETERS,
+        responses=OpenApiTypes.OBJECT,
     )
     def get(
         self,
@@ -3533,6 +3533,8 @@ class EmployeeCommissionPreviewView(
     @extend_schema(
         tags=["Commissions"],
         summary="Calcular comisión de un empleado",
+        parameters=EMPLOYEE_PERIOD_QUERY_PARAMETERS,
+        responses=OpenApiTypes.OBJECT,
     )
     def get(
         self,
@@ -3768,7 +3770,7 @@ class EmployeeCommissionPreviewView(
             "remaining_advance_balance": str(
                 remaining_advance_balance
             ),
-            "commission_plan": str(
+            "commission_plan_public_id": str(
                 commission_plan.public_id
             ),
         })
@@ -4638,7 +4640,7 @@ class CashMovementViewSet(
             != CashRegister.STATUS_OPEN
         ):
             raise ValidationError({
-                "cash_register": (
+                "cash_register_public_id": (
                     "No se pueden registrar "
                     "movimientos en una caja cerrada."
                 )

@@ -37,7 +37,7 @@ class DirectBusinessIsolationTests(BusinessIsolationTestCase):
             (
                 "/api/customers/",
                 {
-                    "business": str(
+                    "business_public_id": str(
                         self.business_b.public_id
                     ),
                     "full_name": "Cliente infiltrado",
@@ -51,7 +51,7 @@ class DirectBusinessIsolationTests(BusinessIsolationTestCase):
             (
                 "/api/suppliers/",
                 {
-                    "business": str(
+                    "business_public_id": str(
                         self.business_b.public_id
                     ),
                     "name": "Proveedor infiltrado",
@@ -65,7 +65,7 @@ class DirectBusinessIsolationTests(BusinessIsolationTestCase):
             (
                 "/api/payment-methods/",
                 {
-                    "business": str(
+                    "business_public_id": str(
                         self.business_b.public_id
                     ),
                     "name": "Método infiltrado",

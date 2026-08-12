@@ -3,6 +3,7 @@ from rest_framework import status
 from core.models import Product
 from core.tests.base import BusinessIsolationTestCase
 from core.tests.factories import (
+    create_category,
     create_product,
     create_user,
 )
@@ -128,6 +129,129 @@ class ProductBusinessIsolationTests(
         self.assertEqual(
             self.product_a.business_id,
             self.business_a.pk,
+        )
+
+    def test_user_can_create_product_with_public_id_relations(self):
+        category = create_category(
+            business=self.business_a,
+            status=self.active_status,
+            name="Categoría A",
+        )
+
+        response = self.client.post(
+            "/api/products/",
+            {
+                "business_public_id": str(
+                    self.business_a.public_id
+                ),
+                "category_public_id": str(
+                    category.public_id
+                ),
+                "title": "Producto normalizado",
+                "description": "",
+                "image_url": "",
+                "base_price": "100.00",
+                "base_cost": "60.00",
+                "stock": 10,
+                "is_visible": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_201_CREATED,
+            msg=response.data,
+        )
+
+        self.assertEqual(
+            response.data["business_public_id"],
+            self.business_a.public_id,
+        )
+        self.assertEqual(
+            response.data["category_public_id"],
+            category.public_id,
+        )
+        self.assertEqual(
+            response.data["status_public_id"],
+            self.active_status.public_id,
+        )
+        self.assertNotIn("business", response.data)
+        self.assertNotIn("category", response.data)
+        self.assertNotIn("status", response.data)
+
+        product = Product.objects.get(
+            public_id=response.data["public_id"],
+        )
+
+        self.assertEqual(
+            product.business_id,
+            self.business_a.pk,
+        )
+        self.assertEqual(
+            product.category_id,
+            category.pk,
+        )
+        self.assertEqual(
+            product.status_id,
+            self.active_status.pk,
+        )
+
+    def test_product_rejects_category_from_another_business(self):
+        foreign_category = create_category(
+            business=self.business_b,
+            status=self.active_status,
+            name="Categoría B",
+        )
+
+        response = self.client.post(
+            "/api/products/",
+            {
+                "business_public_id": str(
+                    self.business_a.public_id
+                ),
+                "category_public_id": str(
+                    foreign_category.public_id
+                ),
+                "title": "Producto con categoría ajena",
+                "description": "",
+                "image_url": "",
+                "base_price": "100.00",
+                "base_cost": "60.00",
+                "stock": 10,
+                "is_visible": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            msg=response.data,
+        )
+        self.assertIn(
+            "category_public_id",
+            response.data,
+        )
+        self.assertFalse(
+            Product.objects.filter(
+                title="Producto con categoría ajena",
+            ).exists()
+        )
+
+    def test_product_list_requires_business_public_id(self):
+        response = self.client.get(
+            "/api/products/",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+            msg=response.data,
+        )
+        self.assertIn(
+            "business_public_id",
+            response.data,
         )
 
     def test_superuser_can_list_products_from_requested_business(self):

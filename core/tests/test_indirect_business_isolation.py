@@ -94,7 +94,7 @@ class ProductVariantTypeIsolationTests(
         response = self.client.post(
             "/api/variant-types/",
             {
-                "product": str(
+                "product_public_id": str(
                     self.product_b.public_id
                 ),
                 "name": "Material",
@@ -114,6 +114,32 @@ class ProductVariantTypeIsolationTests(
             ).exists()
         )
 
+    def test_create_type_derives_business_from_product_public_id(self):
+        response = self.client.post(
+            "/api/variant-types/",
+            {
+                "product_public_id": str(
+                    self.product_a.public_id
+                ),
+                "name": "Material",
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_201_CREATED,
+            msg=response.data,
+        )
+        self.assertEqual(
+            response.data["product_public_id"],
+            self.product_a.public_id,
+        )
+        self.assertNotIn(
+            "business_public_id",
+            response.data,
+        )
+
     def test_user_cannot_move_variant_type_to_foreign_product(self):
         response = self.client.patch(
             (
@@ -121,7 +147,7 @@ class ProductVariantTypeIsolationTests(
                 f"{self.variant_type_a.public_id}/"
             ),
             {
-                "product": str(
+                "product_public_id": str(
                     self.product_b.public_id
                 ),
             },
@@ -235,7 +261,7 @@ class ProductVariantIsolationTests(
         response = self.client.post(
             "/api/variants/",
             {
-                "variant_type": str(
+                "variant_type_public_id": str(
                     self.variant_type_b.public_id
                 ),
                 "label": "Azul",
@@ -264,7 +290,7 @@ class ProductVariantIsolationTests(
                 f"{self.variant_a.public_id}/"
             ),
             {
-                "variant_type": str(
+                "variant_type_public_id": str(
                     self.variant_type_b.public_id
                 ),
             },

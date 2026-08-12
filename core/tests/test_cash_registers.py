@@ -112,10 +112,10 @@ class CashRegisterTests(
         return self.client.post(
             "/api/cash-registers/",
             {
-                "business": str(
+                "business_public_id": str(
                     self.business_a.public_id
                 ),
-                "employee": str(
+                "employee_public_id": str(
                     (
                         employee
                         or self.cashier_employee
@@ -237,10 +237,10 @@ class CashRegisterTests(
         response = self.client.post(
             "/api/cash-registers/",
             {
-                "business": str(
+                "business_public_id": str(
                     self.business_a.public_id
                 ),
-                "employee": str(
+                "employee_public_id": str(
                     self.foreign_employee.public_id
                 ),
                 "opening_balance": "1000.00",
