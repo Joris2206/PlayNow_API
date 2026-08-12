@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 
 from rest_framework import status
@@ -217,6 +218,11 @@ class TransactionCancellationTests(
             },
         )
 
+        self.assertEqual(
+            transaction.status.name,
+            "Anulado",
+        )
+
     def test_cancel_sale_creates_adjustment_movement(
         self,
     ):
@@ -394,11 +400,11 @@ class TransactionCancellationTests(
             )
         )
 
-        # Como el queryset excluye registros
-        # inactivos/anulados, ya no debe encontrarlo.
+        # La transacción continúa visible, pero la baja lógica
+        # determinista no puede aplicarse por segunda vez.
         self.assertEqual(
             second_response.status_code,
-            status.HTTP_404_NOT_FOUND,
+            status.HTTP_409_CONFLICT,
         )
 
         adjustments = (
@@ -419,4 +425,158 @@ class TransactionCancellationTests(
         self.assertEqual(
             self.product.stock,
             10,
+        )
+
+    def test_annulled_transaction_remains_listed_and_retrievable(self):
+        transaction = self._create_sale(quantity=2)
+        self.authenticate_as(self.user_a)
+        endpoint = f"/api/transactions/{transaction.public_id}/"
+
+        self.assertEqual(
+            self.client.delete(endpoint).status_code,
+            status.HTTP_204_NO_CONTENT,
+        )
+
+        list_response = self.client.get(
+            "/api/transactions/",
+            {
+                "business_public_id": str(
+                    self.business_a.public_id
+                ),
+            },
+        )
+        self.assertEqual(
+            list_response.status_code,
+            status.HTTP_200_OK,
+        )
+        returned_ids = {
+            str(item["public_id"])
+            for item in list_response.data["results"]
+        }
+        self.assertIn(str(transaction.public_id), returned_ids)
+
+        retrieve_response = self.client.get(endpoint)
+        self.assertEqual(
+            retrieve_response.status_code,
+            status.HTTP_200_OK,
+        )
+        self.assertEqual(
+            retrieve_response.data["status_name"],
+            "Anulado",
+        )
+
+    def test_patch_cannot_reactivate_annulled_transaction(self):
+        transaction = self._create_sale(quantity=2)
+        self.authenticate_as(self.user_a)
+        endpoint = f"/api/transactions/{transaction.public_id}/"
+        self.client.delete(endpoint)
+
+        response = self.client.patch(
+            endpoint,
+            {
+                "status_public_id": str(
+                    self.active_status.public_id
+                ),
+            },
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("status_public_id", response.data)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.status.name, "Anulado")
+
+    def test_put_cannot_reactivate_annulled_transaction(self):
+        transaction = self._create_sale(quantity=2)
+        self.authenticate_as(self.user_a)
+        endpoint = f"/api/transactions/{transaction.public_id}/"
+        self.client.delete(endpoint)
+
+        current = self.client.get(endpoint).data
+        current["status_public_id"] = str(
+            self.active_status.public_id
+        )
+        response = self.client.put(
+            endpoint,
+            current,
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("status_public_id", response.data)
+        transaction.refresh_from_db()
+        self.assertEqual(transaction.status.name, "Anulado")
+
+        current.pop("status_public_id", None)
+        omitted_status_response = self.client.put(
+            endpoint,
+            current,
+            format="json",
+        )
+        self.assertEqual(
+            omitted_status_response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn(
+            "non_field_errors",
+            omitted_status_response.data,
+        )
+
+    def test_patch_cannot_modify_other_fields_of_annulled_transaction(self):
+        transaction = self._create_sale(quantity=2)
+        self.authenticate_as(self.user_a)
+        endpoint = f"/api/transactions/{transaction.public_id}/"
+        self.client.delete(endpoint)
+
+        response = self.client.patch(
+            endpoint,
+            {"concept": "Intento de modificación"},
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("non_field_errors", response.data)
+        transaction.refresh_from_db()
+        self.assertNotEqual(
+            transaction.concept,
+            "Intento de modificación",
+        )
+
+    def test_annulled_transaction_remains_excluded_from_sales_report(self):
+        transaction = self._create_sale(quantity=2)
+        self.authenticate_as(self.user_a)
+        self.client.delete(
+            f"/api/transactions/{transaction.public_id}/"
+        )
+
+        response = self.client.get(
+            "/api/reports/employee-sales/",
+            {
+                "business_public_id": str(
+                    self.business_a.public_id
+                ),
+                "employee_public_id": str(
+                    self.seller_employee.public_id
+                ),
+                "date_from": date.today().isoformat(),
+                "date_to": date.today().isoformat(),
+            },
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+        self.assertEqual(
+            response.data["summary"]["sales_count"],
+            0,
         )

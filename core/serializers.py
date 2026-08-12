@@ -656,6 +656,102 @@ class ProductVariantSerializer(
             "updated_at",
         )
 
+class PublicProductCategorySerializer(
+    serializers.ModelSerializer,
+):
+    business_public_id = public_id_read_only(
+        source="business",
+    )
+
+    class Meta:
+        model = ProductCategory
+        fields = (
+            "public_id",
+            "business_public_id",
+            "name",
+        )
+        read_only_fields = fields
+
+class PublicProductSerializer(
+    serializers.ModelSerializer,
+):
+    business_public_id = public_id_read_only(
+        source="business",
+    )
+    category_public_id = public_id_read_only(
+        source="category",
+        allow_null=True,
+    )
+    category_name = related_name_field(
+        "category.name",
+        allow_null=True,
+    )
+
+    class Meta:
+        model = Product
+        fields = (
+            "public_id",
+            "business_public_id",
+            "category_public_id",
+            "category_name",
+            "title",
+            "description",
+            "image_url",
+            "base_price",
+            "stock",
+        )
+        read_only_fields = fields
+
+class PublicProductVariantTypeSerializer(
+    serializers.ModelSerializer,
+):
+    product_public_id = public_id_read_only(
+        source="product",
+    )
+    product_name = related_name_field(
+        "product.title",
+    )
+
+    class Meta:
+        model = ProductVariantType
+        fields = (
+            "public_id",
+            "product_public_id",
+            "product_name",
+            "name",
+        )
+        read_only_fields = fields
+
+class PublicProductVariantSerializer(
+    serializers.ModelSerializer,
+):
+    variant_type_public_id = public_id_read_only(
+        source="variant_type",
+    )
+    variant_type_name = related_name_field(
+        "variant_type.name",
+    )
+    product_public_id = public_id_read_only(
+        source="variant_type.product",
+    )
+    product_name = related_name_field(
+        "variant_type.product.title",
+    )
+
+    class Meta:
+        model = ProductVariant
+        fields = (
+            "public_id",
+            "variant_type_public_id",
+            "variant_type_name",
+            "product_public_id",
+            "product_name",
+            "label",
+            "additional_price",
+            "stock",
+        )
+        read_only_fields = fields
+
 class EmployeeSerializer(
     DefaultActiveStatusMixin,
     serializers.ModelSerializer,
@@ -787,6 +883,14 @@ class TransactionDetailSerializer(
 class TransactionSerializer(
     serializers.ModelSerializer
 ):
+    TERMINAL_STATUS_NAMES = {
+        "anulado",
+        "cancelado",
+        "eliminado",
+        "void",
+        "deleted",
+    }
+
     business_public_id = public_id_field(
         Business,
         source="business",
@@ -926,6 +1030,32 @@ class TransactionSerializer(
         )
 
     def validate(self, attrs):
+        if (
+            self.instance is not None
+            and self.instance.status.name.casefold()
+            in self.TERMINAL_STATUS_NAMES
+        ):
+            requested_status = attrs.get("status")
+
+            if (
+                requested_status is not None
+                and requested_status.pk
+                != self.instance.status_id
+            ):
+                raise serializers.ValidationError({
+                    "status_public_id": (
+                        "Una transacción anulada no puede "
+                        "reactivarse mediante PUT o PATCH."
+                    )
+                })
+
+            raise serializers.ValidationError({
+                "non_field_errors": (
+                    "Una transacción anulada no puede "
+                    "modificarse mediante PUT o PATCH."
+                )
+            })
+
         transaction_type = attrs.get(
             "type",
             getattr(
@@ -1119,6 +1249,38 @@ class TransactionSerializer(
                         f"Detalle #{index}: el producto "
                         "no pertenece al negocio "
                         "seleccionado."
+                    )
+                })
+
+            if (
+                self.instance is None
+                and product is not None
+                and product.status.name.casefold()
+                != "activo".casefold()
+            ):
+                raise serializers.ValidationError({
+                    "details": (
+                        f"Detalle #{index}: el producto "
+                        "no se encuentra Activo."
+                    )
+                })
+
+            variant = detail.get("variant")
+
+            if (
+                self.instance is None
+                and variant is not None
+                and (
+                    variant.status.name.casefold()
+                    != "activo"
+                    or variant.variant_type.status.name.casefold()
+                    != "activo"
+                )
+            ):
+                raise serializers.ValidationError({
+                    "details": (
+                        f"Detalle #{index}: la variante o su tipo "
+                        "no se encuentra Activo."
                     )
                 })
 

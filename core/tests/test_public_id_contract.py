@@ -202,5 +202,8 @@ class PublicIdOpenApiContractTests(SimpleTestCase):
                 for parameter in parameters:
                     with self.subTest(path=path, method=method):
                         self.assertEqual(method, "get")
-                        self.assertNotIn("{public_id}", path)
+                        if path.startswith("/api/public/"):
+                            self.assertIn(method, {"get"})
+                        else:
+                            self.assertNotIn("{public_id}", path)
                         self.assertTrue(parameter.get("required"))

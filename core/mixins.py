@@ -30,21 +30,15 @@ class SoftDeleteByStatusMixin:
     transacción para evitar dejar datos parcialmente actualizados.
     """
 
-    SOFT_DELETE_STATUS_CANDIDATES = [
-        "Eliminado",
-        "Anulado",
-        "Cancelado",
-        "Void",
-        "Deleted",
-    ]
+    soft_delete_status_name = "Eliminado"
 
     def _get_soft_delete_status(self):
         return (
             EntityStatus.objects
             .filter(
-                name__in=(
-                    self.SOFT_DELETE_STATUS_CANDIDATES
-                )
+                name__iexact=(
+                    self.soft_delete_status_name
+                ),
             )
             .first()
         )

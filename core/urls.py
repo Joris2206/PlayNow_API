@@ -11,10 +11,13 @@ from .views import (
     StockMovementViewSet, UserViewSet, PasswordResetRequestView, PasswordResetConfirmView,
     EmployeeCommissionPlanViewSet, EmployeeCommissionPreviewView, EmployeeSalesReportView,
     CashMovementViewSet, CashRegisterViewSet, MonthlySummaryView, MonthlyClosureViewSet, PaymentSummaryView,
-    DashboardOverviewView
+    DashboardOverviewView,
+    PublicProductCategoryViewSet, PublicProductViewSet,
+    PublicProductVariantTypeViewSet, PublicProductVariantViewSet
 )
 
 router = DefaultRouter()
+public_router = DefaultRouter()
 # auth
 router.register(r'auth/register', RegisterViewSet, basename='register')
 
@@ -67,7 +70,16 @@ router.register(r'cash-registers', CashRegisterViewSet, basename='cash-register'
 #Cierres mensuales
 router.register(r'monthly-closures', MonthlyClosureViewSet, basename='monthly-closure')
 
+public_router.register(r'categories', PublicProductCategoryViewSet, basename='public-product-category')
+public_router.register(r'products', PublicProductViewSet, basename='public-product')
+public_router.register(r'variant-types', PublicProductVariantTypeViewSet, basename='public-product-variant-type')
+public_router.register(r'variants', PublicProductVariantViewSet, basename='public-product-variant')
+
 urlpatterns = [
+    path(
+        "public/",
+        include(public_router.urls),
+    ),
     path(
         "reports/employee-sales/",
         EmployeeSalesReportView.as_view(),

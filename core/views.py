@@ -53,6 +53,10 @@ from .serializers import (
     PaymentSummaryQuerySerializer,
     SupplierSummaryQuerySerializer,
     CurrentUserSerializer,
+    PublicProductCategorySerializer,
+    PublicProductSerializer,
+    PublicProductVariantSerializer,
+    PublicProductVariantTypeSerializer,
 )
 from datetime import (
     date,
@@ -60,6 +64,7 @@ from datetime import (
     time,
     timedelta,
 )
+from uuid import UUID
 from .services.serializer import ChangePasswordSerializer, PasswordResetRequestSerializer, PasswordResetConfirmSerializer
 from django.conf import settings
 from django.shortcuts import get_object_or_404
@@ -799,7 +804,7 @@ class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelView
     - Los modelos personales con campo `user` continúan filtrándose por
       el usuario autenticado.
     - No se permite crear ni mover registros hacia negocios sin acceso.
-    - Los registros inactivos se excluyen por defecto.
+    - Los endpoints administrativos conservan visibles todos los estados.
     - Se mantiene compatibilidad temporal con `owner_lookup`.
     """
 
@@ -810,15 +815,6 @@ class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelView
 
     throttle_classes = [
         ScopedRateThrottle,
-    ]
-
-    EXCLUDED_STATUS_NAMES = [
-        "Eliminado",
-        "Anulado",
-        "Inactivo",
-        "Cancelado",
-        "Void",
-        "Deleted",
     ]
 
     require_business_public_id_for_list = True
@@ -1231,8 +1227,6 @@ class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelView
         queryset = super().get_queryset()
 
         user = self.request.user
-        model_cls = queryset.model
-
         if not user.is_authenticated:
             return queryset.none()
 
@@ -1292,39 +1286,6 @@ class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelView
                 **{
                     owner_lookup: user,
                 }
-            )
-
-        # -------------------------------------------------
-        # 4. Estados eliminados/inactivos
-        # -------------------------------------------------
-
-        include_inactive = (
-            self.request.query_params.get(
-                "include_inactive"
-            )
-        )
-
-        want_inactive = (
-            str(include_inactive).lower()
-            in (
-                "1",
-                "true",
-                "yes",
-                "y",
-            )
-        )
-
-        if (
-            self._model_has_field(
-                model_cls,
-                "status",
-            )
-            and not want_inactive
-        ):
-            queryset = queryset.exclude(
-                status__name__in=(
-                    self.EXCLUDED_STATUS_NAMES
-                )
             )
 
         return queryset.distinct()
@@ -1594,6 +1555,12 @@ class BusinessViewSet(
     pagination_class = (
         StandardResultsSetPagination
     )
+
+    public_id_filter_fields = {
+        "status_public_id": (
+            "status__public_id"
+        ),
+    }
 
     permission_classes = [
         IsAuthenticated,
@@ -2054,6 +2021,227 @@ class EntityStatusViewSet(viewsets.ReadOnlyModelViewSet):
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination   # opcional (por si lista crece)
+
+
+PUBLIC_CATALOG_BUSINESS_PARAMETER = OpenApiParameter(
+    name="business_public_id",
+    type=OpenApiTypes.UUID,
+    location=OpenApiParameter.QUERY,
+    required=True,
+    description=(
+        "Public ID del negocio cuyo catálogo público se consulta."
+    ),
+)
+
+
+class PublicCatalogViewSet(
+    viewsets.ReadOnlyModelViewSet,
+):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "public_read"
+    pagination_class = StandardResultsSetPagination
+    lookup_field = "public_id"
+    lookup_url_kwarg = "public_id"
+    http_method_names = [
+        "get",
+        "head",
+        "options",
+    ]
+    business_lookup = None
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        business_public_id = (
+            self.request.query_params.get(
+                "business_public_id"
+            )
+        )
+
+        if not business_public_id:
+            raise ValidationError({
+                "business_public_id": (
+                    "Este parámetro es obligatorio."
+                )
+            })
+
+        try:
+            business_public_id = UUID(
+                str(business_public_id)
+            )
+        except (TypeError, ValueError, AttributeError):
+            raise ValidationError({
+                "business_public_id": (
+                    "Debe ser un UUID válido."
+                )
+            })
+
+        return queryset.filter(
+            **{
+                (
+                    f"{self.business_lookup}"
+                    "__public_id"
+                ): business_public_id,
+            }
+        )
+
+
+@extend_schema_view(
+    list=extend_schema(
+        tags=["Public Catalog"],
+        parameters=[PUBLIC_CATALOG_BUSINESS_PARAMETER],
+        description=(
+            "Lista únicamente categorías Activas del negocio."
+        ),
+    ),
+    retrieve=extend_schema(
+        tags=["Public Catalog"],
+        parameters=[PUBLIC_CATALOG_BUSINESS_PARAMETER],
+        description=(
+            "Obtiene una categoría Activa del negocio."
+        ),
+    ),
+)
+class PublicProductCategoryViewSet(
+    PublicCatalogViewSet,
+):
+    queryset = (
+        ProductCategory.objects
+        .select_related("business")
+        .filter(status__name__iexact="Activo")
+    )
+    serializer_class = PublicProductCategorySerializer
+    business_lookup = "business"
+    search_fields = ["name"]
+    ordering_fields = ["name"]
+    ordering = ["name"]
+
+
+@extend_schema_view(
+    list=extend_schema(
+        tags=["Public Catalog"],
+        parameters=[PUBLIC_CATALOG_BUSINESS_PARAMETER],
+        description=(
+            "Lista únicamente productos Activos y visibles del negocio."
+        ),
+    ),
+    retrieve=extend_schema(
+        tags=["Public Catalog"],
+        parameters=[PUBLIC_CATALOG_BUSINESS_PARAMETER],
+        description=(
+            "Obtiene un producto Activo y visible del negocio."
+        ),
+    ),
+)
+class PublicProductViewSet(
+    PublicCatalogViewSet,
+):
+    queryset = (
+        Product.objects
+        .select_related("business", "category")
+        .filter(
+            status__name__iexact="Activo",
+            is_visible=True,
+        )
+    )
+    serializer_class = PublicProductSerializer
+    business_lookup = "business"
+    public_id_filter_fields = {
+        "category_public_id": (
+            "category__public_id"
+        ),
+    }
+    search_fields = ["title"]
+    ordering_fields = ["title", "base_price"]
+    ordering = ["title"]
+
+
+@extend_schema_view(
+    list=extend_schema(
+        tags=["Public Catalog"],
+        parameters=[PUBLIC_CATALOG_BUSINESS_PARAMETER],
+        description=(
+            "Lista tipos de variante Activos de productos públicos."
+        ),
+    ),
+    retrieve=extend_schema(
+        tags=["Public Catalog"],
+        parameters=[PUBLIC_CATALOG_BUSINESS_PARAMETER],
+        description=(
+            "Obtiene un tipo de variante Activo de un producto público."
+        ),
+    ),
+)
+class PublicProductVariantTypeViewSet(
+    PublicCatalogViewSet,
+):
+    queryset = (
+        ProductVariantType.objects
+        .select_related("product", "product__business")
+        .filter(
+            status__name__iexact="Activo",
+            product__status__name__iexact="Activo",
+            product__is_visible=True,
+        )
+    )
+    serializer_class = PublicProductVariantTypeSerializer
+    business_lookup = "product__business"
+    public_id_filter_fields = {
+        "product_public_id": (
+            "product__public_id"
+        ),
+    }
+    ordering_fields = ["name"]
+    ordering = ["name"]
+
+
+@extend_schema_view(
+    list=extend_schema(
+        tags=["Public Catalog"],
+        parameters=[PUBLIC_CATALOG_BUSINESS_PARAMETER],
+        description=(
+            "Lista variantes Activas de productos públicos."
+        ),
+    ),
+    retrieve=extend_schema(
+        tags=["Public Catalog"],
+        parameters=[PUBLIC_CATALOG_BUSINESS_PARAMETER],
+        description=(
+            "Obtiene una variante Activa de un producto público."
+        ),
+    ),
+)
+class PublicProductVariantViewSet(
+    PublicCatalogViewSet,
+):
+    queryset = (
+        ProductVariant.objects
+        .select_related(
+            "variant_type",
+            "variant_type__product",
+            "variant_type__product__business",
+        )
+        .filter(
+            status__name__iexact="Activo",
+            variant_type__status__name__iexact="Activo",
+            variant_type__product__status__name__iexact=(
+                "Activo"
+            ),
+            variant_type__product__is_visible=True,
+        )
+    )
+    serializer_class = PublicProductVariantSerializer
+    business_lookup = "variant_type__product__business"
+    public_id_filter_fields = {
+        "product_public_id": (
+            "variant_type__product__public_id"
+        ),
+        "variant_type_public_id": (
+            "variant_type__public_id"
+        ),
+    }
+    ordering_fields = ["label", "additional_price"]
+    ordering = ["label"]
     
 
 @extend_schema_view(
@@ -2099,6 +2287,12 @@ class ProductCategoryViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
+
+    public_id_filter_fields = {
+        "status_public_id": (
+            "status__public_id"
+        ),
+    }
 
 
 @extend_schema_view(
@@ -2209,6 +2403,12 @@ class ProductVariantTypeViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
 
+    public_id_filter_fields = {
+        "status_public_id": (
+            "status__public_id"
+        ),
+    }
+
 
 @extend_schema_view(
     list=extend_schema(tags=["Product Variants"]),
@@ -2253,6 +2453,12 @@ class ProductVariantViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
+
+    public_id_filter_fields = {
+        "status_public_id": (
+            "status__public_id"
+        ),
+    }
 
 
 @extend_schema_view(
@@ -2443,6 +2649,12 @@ class PaymentMethodViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
 
+    public_id_filter_fields = {
+        "status_public_id": (
+            "status__public_id"
+        ),
+    }
+
 
 @extend_schema_view(
     list=extend_schema(tags=["Stock Movements"]),
@@ -2537,6 +2749,7 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     )
     serializer_class = TransactionSerializer
     business_lookup = "business"
+    soft_delete_status_name = "Anulado"
 
     read_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
@@ -2954,6 +3167,12 @@ class NotificationViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
 
+    public_id_filter_fields = {
+        "status_public_id": (
+            "status__public_id"
+        ),
+    }
+
 
 @extend_schema_view(
     list=extend_schema(tags=["Reminders"]),
@@ -2977,6 +3196,12 @@ class ReminderViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
+
+    public_id_filter_fields = {
+        "status_public_id": (
+            "status__public_id"
+        ),
+    }
 
 
 @extend_schema_view(
@@ -3002,6 +3227,12 @@ class BudgetViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
 
+    public_id_filter_fields = {
+        "status_public_id": (
+            "status__public_id"
+        ),
+    }
+
 
 @extend_schema_view(
     list=extend_schema(tags=["Goals"]),
@@ -3025,6 +3256,12 @@ class GoalViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
     pagination_class = StandardResultsSetPagination
+
+    public_id_filter_fields = {
+        "status_public_id": (
+            "status__public_id"
+        ),
+    }
 
 @extend_schema_view(
     list=extend_schema(tags=["Goal Progress"]),
@@ -3053,6 +3290,12 @@ class GoalProgressViewSet(BusinessScopedViewSet):
     ]
 
     pagination_class = StandardResultsSetPagination
+
+    public_id_filter_fields = {
+        "status_public_id": (
+            "status__public_id"
+        ),
+    }
 
 @extend_schema(tags=["Users"])
 class UserViewSet(viewsets.GenericViewSet):

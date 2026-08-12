@@ -6,6 +6,7 @@ from core.models import BusinessMembership, Debt, StockMovement, Transaction
 from core.tests.base import BusinessIsolationTestCase
 from core.tests.factories import (
     create_customer, create_payment_method, create_product, create_role_user,
+    create_status,
     create_supplier, create_variant, create_variant_type,
 )
 
@@ -140,6 +141,70 @@ class TransactionTests(BusinessIsolationTestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("details", response.data)
+
+    def test_new_sale_rejects_inactive_product(self):
+        inactive_product = create_product(
+            business=self.business_a,
+            status=create_status("Inactivo"),
+            title="Producto inactivo",
+            stock=10,
+        )
+
+        response = self.client.post(
+            "/api/transactions/",
+            self.sale_payload(
+                product=inactive_product,
+            ),
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("details", response.data)
+
+    def test_new_sale_rejects_inactive_variant(self):
+        inactive_variant = create_variant(
+            variant_type=self.variant_type,
+            status=create_status("Inactivo"),
+            label="Inactiva",
+            stock=10,
+        )
+
+        response = self.client.post(
+            "/api/transactions/",
+            self.sale_payload(
+                product=self.variant_product,
+                variant=inactive_variant,
+            ),
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        self.assertIn("details", response.data)
+
+    def test_new_sale_rejects_variant_from_inactive_type(self):
+        self.variant_type.status = create_status("Inactivo")
+        self.variant_type.save(update_fields=["status"])
+
+        response = self.client.post(
+            "/api/transactions/",
+            self.sale_payload(
+                product=self.variant_product,
+                variant=self.variant,
+            ),
+            format="json",
+        )
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
         self.assertIn("details", response.data)
 
     def test_sale_can_include_multiple_products(self):
