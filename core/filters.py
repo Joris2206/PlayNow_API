@@ -1,8 +1,13 @@
 # core/filters.py
 from django_filters import rest_framework as filters
 from .models import StockMovement, Transaction
+from django_filters.rest_framework import (
+    DjangoFilterBackend,
+)
 
-class TransactionFilter(filters.FilterSet):
+class TransactionFilter(
+    filters.FilterSet
+):
     business_public_id = filters.UUIDFilter(
         field_name="business__public_id",
     )
@@ -19,12 +24,28 @@ class TransactionFilter(filters.FilterSet):
         field_name="employee__public_id",
     )
 
-    payment_method_public_id = filters.UUIDFilter(
-        field_name="payment_method__public_id",
+    payment_method_public_id = (
+        filters.UUIDFilter(
+            field_name=(
+                "payment_method__public_id"
+            ),
+        )
     )
 
     status_public_id = filters.UUIDFilter(
         field_name="status__public_id",
+    )
+
+    type = filters.CharFilter(
+        field_name="type",
+    )
+
+    payment_status = filters.CharFilter(
+        field_name="payment_status",
+    )
+
+    is_debt = filters.BooleanFilter(
+        field_name="is_debt",
     )
 
     date_from = filters.DateFilter(
@@ -39,41 +60,43 @@ class TransactionFilter(filters.FilterSet):
 
     class Meta:
         model = Transaction
+        fields = []
 
-        fields = (
-            "type",
-            "payment_status",
-            "is_debt",
+class StockMovementFilter(
+    filters.FilterSet
+):
+    created_at = (
+        filters.IsoDateTimeFromToRangeFilter(
+            field_name="created_at",
         )
-
-class StockMovementFilter(filters.FilterSet):
-    created_at = filters.IsoDateTimeFromToRangeFilter(
-        field_name="created_at"
     )
 
-    business_public_id = filters.CharFilter(
-        field_name="product__business__public_id",
-        lookup_expr="iexact",
+    business_public_id = filters.UUIDFilter(
+        field_name=(
+            "product__business__public_id"
+        )
     )
 
-    transaction_business_public_id = filters.CharFilter(
-        field_name="transaction__business__public_id",
-        lookup_expr="iexact",
+    transaction_business_public_id = (
+        filters.UUIDFilter(
+            field_name=(
+                "transaction__business__public_id"
+            ),
+        )
     )
 
-    product_public_id = filters.CharFilter(
+    product_public_id = filters.UUIDFilter(
         field_name="product__public_id",
-        lookup_expr="iexact",
     )
 
-    variant_public_id = filters.CharFilter(
+    variant_public_id = filters.UUIDFilter(
         field_name="variant__public_id",
-        lookup_expr="iexact",
     )
 
-    transaction_public_id = filters.CharFilter(
-        field_name="transaction__public_id",
-        lookup_expr="iexact",
+    transaction_public_id = (
+        filters.UUIDFilter(
+            field_name="transaction__public_id",
+        )
     )
 
     type = filters.CharFilter(
@@ -83,10 +106,102 @@ class StockMovementFilter(filters.FilterSet):
 
     class Meta:
         model = StockMovement
-        fields = (
-            "type",
-            "transaction",
-            "product",
-            "variant",
-            "created_at",
+        fields = []
+
+class PublicIdFilterBackend(
+    DjangoFilterBackend
+):
+    def get_filterset_class(
+        self,
+        view,
+        queryset=None,
+    ):
+        explicit_class = getattr(
+            view,
+            "filterset_class",
+            None,
         )
+
+        if explicit_class is not None:
+            return explicit_class
+
+        if queryset is None:
+            return None
+
+        public_id_fields = dict(
+            getattr(
+                view,
+                "public_id_filter_fields",
+                {},
+            )
+            or {}
+        )
+
+        simple_fields = dict(
+            getattr(
+                view,
+                "simple_filter_fields",
+                {},
+            )
+            or {}
+        )
+
+        business_lookup = getattr(
+            view,
+            "business_lookup",
+            None,
+        )
+
+        attrs = {
+            "__module__": __name__,
+        }
+
+        if business_lookup:
+            attrs["business_public_id"] = (
+                filters.UUIDFilter(
+                    field_name=(
+                        f"{business_lookup}__public_id"
+                    ),
+                )
+            )
+
+        for public_name, orm_field in (
+            public_id_fields.items()
+        ):
+            attrs[public_name] = (
+                filters.UUIDFilter(
+                    field_name=orm_field,
+                )
+            )
+
+        for public_name, filter_obj in (
+            simple_fields.items()
+        ):
+            attrs[public_name] = filter_obj
+
+        if len(attrs) == 1:
+            return super().get_filterset_class(
+                view,
+                queryset,
+            )
+
+        meta = type(
+            "Meta",
+            (),
+            {
+                "model": queryset.model,
+                "fields": [],
+            },
+        )
+
+        attrs["Meta"] = meta
+
+        return type(
+            (
+                f"{queryset.model.__name__}"
+                "AutoFilter"
+            ),
+            (filters.FilterSet,),
+            attrs,
+        )
+ 

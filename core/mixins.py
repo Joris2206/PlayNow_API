@@ -6,6 +6,16 @@ from rest_framework.response import Response
 
 from .models import EntityStatus
 
+from django.shortcuts import get_object_or_404
+from rest_framework.exceptions import (
+    ValidationError,
+    PermissionDenied,
+)
+
+from core.models import (
+    Business,
+    BusinessMembership,
+)
 
 class SoftDeleteByStatusMixin:
     """
@@ -76,6 +86,15 @@ class SoftDeleteByStatusMixin:
                 ),
             )
 
+        validator = getattr(
+            self,
+            "validate_destroy_access",
+            None,
+        )
+
+        if validator:
+            validator(instance)
+
         # Primero ejecuta los efectos secundarios.
         # Si fallan, no se cambia el estado.
         self.on_soft_delete(instance)
@@ -94,3 +113,116 @@ class SoftDeleteByStatusMixin:
         return Response(
             status=drf_status.HTTP_204_NO_CONTENT
         )
+
+class RequireBusinessPublicIdListMixin:
+    require_business_public_id_for_list = True
+
+    business_query_param = (
+        "business_public_id"
+    )
+
+    business_lookup = None
+    list_allowed_roles = None
+
+    def _get_list_allowed_roles(self):
+        roles = getattr(
+            self,
+            "list_allowed_roles",
+            None,
+        )
+
+        if roles is not None:
+            return roles
+
+        return getattr(
+            self,
+            "read_allowed_roles",
+            None,
+        )
+
+    def _get_required_list_business(self):
+        business_public_id = (
+            self.request.query_params.get(
+                self.business_query_param
+            )
+        )
+
+        if not business_public_id:
+            raise ValidationError({
+                self.business_query_param: (
+                    "Este parámetro es obligatorio."
+                )
+            })
+
+        return get_object_or_404(
+            Business,
+            public_id=business_public_id,
+        )
+
+    def _validate_list_business_access(
+        self,
+        business,
+    ):
+        user = self.request.user
+
+        if user.is_superuser:
+            return
+
+        filters = {
+            "user": user,
+            "business": business,
+            "is_active": True,
+        }
+
+        allowed_roles = (
+            self._get_list_allowed_roles()
+        )
+
+        if allowed_roles is not None:
+            filters["role__in"] = (
+                allowed_roles
+            )
+
+        has_access = (
+            BusinessMembership.objects
+            .filter(**filters)
+            .exists()
+        )
+
+        if not has_access:
+            raise PermissionDenied(
+                "No tienes permiso para consultar "
+                "este negocio."
+            )
+
+    def filter_queryset(
+        self,
+        queryset,
+    ):
+        if (
+            getattr(self, "action", None)
+            == "list"
+            and self.require_business_public_id_for_list
+            and self.business_lookup
+        ):
+            business = (
+                self._get_required_list_business()
+            )
+
+            self._validate_list_business_access(
+                business
+            )
+
+            queryset = queryset.filter(
+                **{
+                    (
+                        f"{self.business_lookup}"
+                        "__public_id"
+                    ): business.public_id,
+                }
+            )
+
+        return super().filter_queryset(
+            queryset
+        )
+    

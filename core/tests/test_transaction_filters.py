@@ -55,34 +55,102 @@ class TransactionFilterTests(BusinessIsolationTestCase):
     def test_filter_by_employee_public_id(self):
         response = self.client.get(
             "/api/transactions/",
-            {"employee_public_id": str(self.seller_a.public_id)},
+            {
+                "business_public_id": str(
+                    self.business_a.public_id
+                ),
+                "employee_public_id": str(
+                    self.seller_a.public_id
+                ),
+            },
         )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        ids = get_public_ids(response)
-        self.assertIn(str(self.july_sale.public_id), ids)
-        self.assertIn(str(self.august_sale.public_id), ids)
-        self.assertNotIn(str(self.other_seller_sale.public_id), ids)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        ids = get_public_ids(
+            response
+        )
+
+        self.assertIn(
+            str(self.july_sale.public_id),
+            ids,
+        )
+
+        self.assertIn(
+            str(self.august_sale.public_id),
+            ids,
+        )
+
+        self.assertNotIn(
+            str(self.other_seller_sale.public_id),
+            ids,
+        )
 
     def test_filter_by_date_range(self):
         response = self.client.get(
             "/api/transactions/",
-            {"date_from": "2026-08-01", "date_to": "2026-08-31"},
+            {
+                "business_public_id": str(
+                    self.business_a.public_id
+                ),
+                "date_from": "2026-08-01",
+                "date_to": "2026-08-31",
+            },
         )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        ids = get_public_ids(response)
-        self.assertNotIn(str(self.july_sale.public_id), ids)
-        self.assertIn(str(self.august_sale.public_id), ids)
-        self.assertIn(str(self.other_seller_sale.public_id), ids)
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        ids = get_public_ids(
+            response
+        )
+
+        self.assertNotIn(
+            str(self.july_sale.public_id),
+            ids,
+        )
+
+        self.assertIn(
+            str(self.august_sale.public_id),
+            ids,
+        )
+
+        self.assertIn(
+            str(self.other_seller_sale.public_id),
+            ids,
+        )
 
     def test_filter_by_employee_and_date_range(self):
         response = self.client.get(
             "/api/transactions/",
             {
-                "employee_public_id": str(self.seller_a.public_id),
+                "business_public_id": str(
+                    self.business_a.public_id
+                ),
+                "employee_public_id": str(
+                    self.seller_a.public_id
+                ),
                 "date_from": "2026-08-01",
                 "date_to": "2026-08-31",
                 "type": "sale",
             },
         )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(get_public_ids(response), {str(self.august_sale.public_id)})
+
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        self.assertEqual(
+            get_public_ids(response),
+            {
+                str(
+                    self.august_sale.public_id
+                )
+            },
+        )

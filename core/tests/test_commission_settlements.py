@@ -399,22 +399,15 @@ class CommissionSettlementPermissionTests(
         )
 
         response = self.client.get(
-            "/api/commission-settlements/"
+            "/api/commission-settlements/",
+            {
+                "business_public_id": str(
+                    self.business_a.public_id
+                ),
+            },
         )
 
         self.assertEqual(
             response.status_code,
-            status.HTTP_200_OK,
-        )
-
-        results = (
-            response.data.get(
-                "results",
-                response.data,
-            )
-        )
-
-        self.assertEqual(
-            len(results),
-            0,
+            status.HTTP_403_FORBIDDEN,
         )

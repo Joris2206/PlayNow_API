@@ -79,7 +79,9 @@ class ProductBusinessIsolationTests(
         response = self.client.post(
             "/api/products/",
             {
-                "business": self.business_b.public_id,
+                "business_public_id": str(
+                    self.business_b.public_id
+                ),
                 "title": "Producto infiltrado",
                 "description": "",
                 "image_url": "",
@@ -109,7 +111,9 @@ class ProductBusinessIsolationTests(
                 f"{self.product_a.public_id}/"
             ),
             {
-                "business": self.business_b.public_id,
+                "business_public_id": str(
+                    self.business_b.public_id
+                ),
             },
             format="json",
         )
@@ -126,32 +130,42 @@ class ProductBusinessIsolationTests(
             self.business_a.pk,
         )
 
-    def test_superuser_can_list_products_from_all_businesses(self):
+    def test_superuser_can_list_products_from_requested_business(self):
         superuser = create_user(
             email="platform.admin@playnow.test",
             full_name="Administrador de plataforma",
             is_superuser=True,
         )
 
-        self.authenticate_as(superuser)
+        self.authenticate_as(
+            superuser
+        )
 
         response = self.client.get(
             "/api/products/",
+            {
+                "business_public_id": str(
+                    self.business_a.public_id
+                ),
+            },
         )
 
         self.assertEqual(
             response.status_code,
             status.HTTP_200_OK,
+            msg=response.data,
         )
 
-        returned_ids = get_public_ids(response)
+        returned_ids = get_public_ids(
+            response
+        )
 
         self.assertIn(
             str(self.product_a.public_id),
             returned_ids,
         )
 
-        self.assertIn(
+        self.assertNotIn(
             str(self.product_b.public_id),
             returned_ids,
         )

@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, PermissionDenied
 from rest_framework.generics import GenericAPIView
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiExample, OpenApiResponse
-
+from django_filters import rest_framework as filters
 from core.services.customer_supplier_reports import build_customers_summary, build_suppliers_summary
 from core.services.dashboard import build_dashboard_overview
 from core.services.inventory_report import build_inventory_summary
@@ -17,8 +17,11 @@ from core.services.monthly_summary import build_monthly_summary
 from core.services.payment_debt_reports import build_debts_summary, build_payments_summary
 from .filters import StockMovementFilter, TransactionFilter
 from .pagination import StandardResultsSetPagination
-from .mixins import SoftDeleteByStatusMixin
-from django.db import transaction as db_tx
+from .mixins import RequireBusinessPublicIdListMixin, SoftDeleteByStatusMixin
+from django.db import (
+    IntegrityError,
+    transaction as db_tx,
+)
 from django.db.models import (Avg, Count, Q, Sum, Max)
 from collections import defaultdict
 from core.utils import calculate_employee_advance_summary, log_action
@@ -389,7 +392,7 @@ from .models import (
     Employee, Customer, Supplier, PaymentMethod,
     Transaction, TransactionDetail, StockMovement,
     Debt, DebtPayment, Notification, Reminder,
-    Budget, Goal, GoalProgress, EmployeeCommissionPlan, CommissionSettlement
+    Budget, Goal, GoalProgress, EmployeeCommissionPlan, CommissionSettlement, CashMovement
 )
 from .serializers import (
     UserSerializer, RegisterSerializer,
@@ -400,7 +403,6 @@ from .serializers import (
     DebtSerializer, DebtPaymentSerializer, NotificationSerializer, ReminderSerializer,
     BudgetSerializer, GoalSerializer, GoalProgressSerializer, 
     CommissionSettlementCreateSerializer, CommissionSettlementSerializer, EmployeeCommissionPlanSerializer,
-    CashMovement
 )
 from .permissions import IsOwnerOrBusinessOwner
 
@@ -749,7 +751,7 @@ class RegisterViewSet(mixins.CreateModelMixin, viewsets.GenericViewSet):
 
 # -------- Base mixin para filtrar por usuario --------
 
-class BusinessScopedViewSet(viewsets.ModelViewSet):
+class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelViewSet):
     """
     ViewSet base para recursos pertenecientes a un usuario o negocio.
 
@@ -779,7 +781,15 @@ class BusinessScopedViewSet(viewsets.ModelViewSet):
         "Anulado",
         "Inactivo",
         "Cancelado",
+        "Void",
+        "Deleted",
     ]
+
+    require_business_public_id_for_list = True
+
+    business_query_param = (
+        "business_public_id"
+    )
 
     # Nueva ruta recomendada hacia Business.
     #
@@ -987,6 +997,26 @@ class BusinessScopedViewSet(viewsets.ModelViewSet):
                 "este negocio."
             )
 
+    def validate_destroy_access(
+        self,
+        instance,
+    ):
+        business = (
+            self._get_business_from_instance(
+                instance
+            )
+        )
+
+        if business is None:
+            return
+
+        self._validate_business_access(
+            business,
+            allowed_roles=(
+                self.destroy_allowed_roles
+            ),
+        )
+
     def _resolve_attribute_path(
         self,
         obj,
@@ -1163,70 +1193,74 @@ class BusinessScopedViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
+
         user = self.request.user
         model_cls = queryset.model
 
         if not user.is_authenticated:
             return queryset.none()
 
-        if not self._is_platform_admin(user):
-            business_lookup = (
-                self._get_business_lookup()
-            )
+        business_lookup = (
+            self._get_business_lookup()
+        )
 
-            if business_lookup:
-                membership_user_lookup = (
+        owner_lookup = getattr(
+            self,
+            "owner_lookup",
+            None,
+        )
+
+        # -------------------------------------------------
+        # 1. Limitar por membresías
+        # -------------------------------------------------
+
+        if (
+            not self._is_platform_admin(user)
+            and business_lookup
+        ):
+            membership_filters = {
+                (
                     f"{business_lookup}"
                     "__memberships__user"
-                )
-
-                membership_active_lookup = (
+                ): user,
+                (
                     f"{business_lookup}"
                     "__memberships__is_active"
-                )
+                ): True,
+            }
 
-                membership_filters = {
-                    membership_user_lookup: user,
-                    membership_active_lookup: True,
-                }
-
-                if self.read_allowed_roles is not None:
-                    membership_role_lookup = (
+            if (
+                self.read_allowed_roles
+                is not None
+            ):
+                membership_filters[
+                    (
                         f"{business_lookup}"
                         "__memberships__role__in"
                     )
+                ] = self.read_allowed_roles
 
-                    membership_filters[
-                        membership_role_lookup
-                    ] = self.read_allowed_roles
+            queryset = queryset.filter(
+                **membership_filters
+            )
 
-                queryset = queryset.filter(
-                    **membership_filters
-                )
+        # -------------------------------------------------
+        # 2. Recursos personales
+        # -------------------------------------------------
 
-            else:
-                owner_lookup = getattr(self, "owner_lookup", None)
+        if (
+            not self._is_platform_admin(user)
+            and owner_lookup
+        ):
+            queryset = queryset.filter(
+                **{
+                    owner_lookup: user,
+                }
+            )
 
-                if owner_lookup:
-                    # Recursos personales, por ejemplo:
-                    # owner_lookup = "user"
-                    # owner_lookup = "goal__user"
-                    queryset = queryset.filter(
-                        **{owner_lookup: user}
-                    )
-
-                elif self._model_has_field(
-                    model_cls,
-                    "user",
-                ):
-                    queryset = queryset.filter(
-                        user=user
-                    )
-
-                else:
-                    # Un modelo sin usuario ni ruta hacia un negocio no
-                    # debe mostrar accidentalmente todos los registros.
-                    queryset = queryset.none()
+        # -------------------------------------------------
+        # 4. Estados eliminados/inactivos
+        # -------------------------------------------------
 
         include_inactive = (
             self.request.query_params.get(
@@ -1234,13 +1268,14 @@ class BusinessScopedViewSet(viewsets.ModelViewSet):
             )
         )
 
-        want_inactive = str(
-            include_inactive
-        ).lower() in (
-            "1",
-            "true",
-            "yes",
-            "y",
+        want_inactive = (
+            str(include_inactive).lower()
+            in (
+                "1",
+                "true",
+                "yes",
+                "y",
+            )
         )
 
         if (
@@ -1257,7 +1292,7 @@ class BusinessScopedViewSet(viewsets.ModelViewSet):
             )
 
         return queryset.distinct()
-
+    
     def perform_create(self, serializer):
         model_cls = serializer.Meta.model
         user = self.request.user
@@ -2073,7 +2108,20 @@ class ProductViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     lookup_field = "public_id"
     lookup_url_kwarg = "public_id"
 
-    filterset_fields = ["status", "business", "business__public_id"]
+    public_id_filter_fields = {
+        "category_public_id":
+            "category__public_id",
+
+        "status_public_id":
+            "status__public_id",
+    }
+
+    simple_filter_fields = {
+        "is_visible":
+            filters.BooleanFilter(
+                field_name="is_visible",
+            ),
+    }
     search_fields = ["title"]
     ordering_fields = ["title", "created_at", "updated_at"]
     ordering = ["-created_at"]
@@ -2200,7 +2248,12 @@ class EmployeeViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     update_allowed_roles = read_allowed_roles
     destroy_allowed_roles = read_allowed_roles
 
-    filterset_fields = ["status", "business", "business__public_id"]
+    public_id_filter_fields = {
+        "status_public_id": (
+            "status__public_id"
+        ),
+    }
+    
     search_fields = ["full_name", "phone"]
     ordering_fields = ["full_name", "created_at", "updated_at"]
     ordering = ["-created_at"]
@@ -2250,7 +2303,12 @@ class CustomerViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         BusinessMembership.ROLE_ADMIN,
     ]
     
-    filterset_fields = ["status", "business", "business__public_id"]
+    public_id_filter_fields = {
+        "status_public_id": (
+            "status__public_id"
+        ),
+    }
+    
     search_fields = ["full_name", "email", "phone"]
     ordering_fields = ["full_name", "created_at", "updated_at"]
     ordering = ["-created_at"]
@@ -2298,7 +2356,12 @@ class SupplierViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         BusinessMembership.ROLE_ADMIN,
     ]
 
-    filterset_fields = ["status", "business", "business__public_id"]
+    public_id_filter_fields = {
+        "status_public_id": (
+            "status__public_id"
+        ),
+    }
+    
     search_fields = ["name", "email", "phone"]
     ordering_fields = ["name", "created_at", "updated_at"]
     ordering = ["-created_at"]
@@ -2848,6 +2911,7 @@ class NotificationViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = Notification.objects.select_related("user", "business", "transaction").all()
     serializer_class = NotificationSerializer
 
+    business_lookup = "business"
     owner_lookup = "user"
 
     lookup_field = "public_id"
@@ -2871,6 +2935,7 @@ class ReminderViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = Reminder.objects.select_related("user", "business", "transaction").all()
     serializer_class = ReminderSerializer
 
+    business_lookup = "business"
     owner_lookup = "user"
 
     lookup_field = "public_id"
@@ -2894,6 +2959,7 @@ class BudgetViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = Budget.objects.select_related("user", "business").all()
     serializer_class = BudgetSerializer
 
+    business_lookup = "business"
     owner_lookup = "user"
 
     lookup_field = "public_id"
@@ -2917,6 +2983,7 @@ class GoalViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = Goal.objects.select_related("user", "business").all()
     serializer_class = GoalSerializer
 
+    business_lookup = "business"
     owner_lookup = "user"
 
     lookup_field = "public_id"
@@ -2931,14 +2998,12 @@ class GoalViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         description="Registra un avance y actualiza automáticamente el progreso de la meta.",
         examples=[GOAL_PROGRESS_CREATE_EXAMPLE],
     ),
-    update=extend_schema(tags=["Goal Progress"]),
-    partial_update=extend_schema(tags=["Goal Progress"]),
-    destroy=extend_schema(tags=["Goal Progress"]),
 )
-class GoalProgressViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
+class GoalProgressViewSet(BusinessScopedViewSet):
     queryset = GoalProgress.objects.select_related("goal", "goal__business").all()
     serializer_class = GoalProgressSerializer
 
+    business_lookup = "goal__business"
     owner_lookup = "goal__user"
 
     lookup_field = "public_id"
@@ -3037,6 +3102,7 @@ class PasswordResetConfirmView(APIView):
     ),
 )
 class EmployeeCommissionPlanViewSet(
+    RequireBusinessPublicIdListMixin,
     viewsets.ModelViewSet
 ):
     queryset = (
@@ -3066,11 +3132,17 @@ class EmployeeCommissionPlanViewSet(
         StandardResultsSetPagination
     )
 
-    filterset_fields = [
-        "employee__public_id",
-        "employee__business__public_id",
-        "is_active",
-    ]
+    public_id_filter_fields = {
+        "employee_public_id": (
+            "employee__public_id"
+        ),
+    }
+
+    simple_filter_fields = {
+        "is_active": filters.BooleanFilter(
+            field_name="is_active",
+        ),
+    }
 
     ordering_fields = [
         "valid_from",
@@ -3081,6 +3153,15 @@ class EmployeeCommissionPlanViewSet(
 
     ordering = [
         "-valid_from",
+    ]
+
+    business_lookup = (
+        "employee__business"
+    )
+
+    list_allowed_roles = [
+        BusinessMembership.ROLE_OWNER,
+        BusinessMembership.ROLE_ADMIN,
     ]
 
     def get_queryset(self):
@@ -3727,6 +3808,7 @@ class EmployeeCommissionPreviewView(
     ),
 )
 class CommissionSettlementViewSet(
+    RequireBusinessPublicIdListMixin,
     viewsets.GenericViewSet,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
@@ -3756,13 +3838,23 @@ class CommissionSettlementViewSet(
         StandardResultsSetPagination
     )
 
-    filterset_fields = [
-        "employee__public_id",
-        "employee__business__public_id",
-        "status",
-        "period_start",
-        "period_end",
-    ]
+    public_id_filter_fields = {
+        "employee_public_id": (
+            "employee__public_id"
+        ),
+    }
+
+    simple_filter_fields = {
+        "status": filters.CharFilter(
+            field_name="status",
+        ),
+        "period_start": filters.DateFilter(
+            field_name="period_start",
+        ),
+        "period_end": filters.DateFilter(
+            field_name="period_end",
+        ),
+    }
 
     ordering_fields = [
         "period_start",
@@ -3776,6 +3868,15 @@ class CommissionSettlementViewSet(
     ordering = [
         "-period_end",
         "-created_at",
+    ]
+
+    business_lookup = (
+        "employee__business"
+    )
+
+    list_allowed_roles = [
+        BusinessMembership.ROLE_OWNER,
+        BusinessMembership.ROLE_ADMIN,
     ]
 
     def get_serializer_class(self):
@@ -3996,6 +4097,7 @@ class CommissionSettlementViewSet(
     ),
 )
 class CashRegisterViewSet(
+    RequireBusinessPublicIdListMixin,
     viewsets.GenericViewSet,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
@@ -4023,11 +4125,17 @@ class CashRegisterViewSet(
         StandardResultsSetPagination
     )
 
-    filterset_fields = [
-        "business__public_id",
-        "employee__public_id",
-        "status",
-    ]
+    public_id_filter_fields = {
+        "employee_public_id": (
+            "employee__public_id"
+        ),
+    }
+
+    simple_filter_fields = {
+        "status": filters.CharFilter(
+            field_name="status",
+        ),
+    }
 
     ordering_fields = [
         "open_time",
@@ -4039,6 +4147,14 @@ class CashRegisterViewSet(
 
     ordering = [
         "-open_time",
+    ]
+
+    business_lookup = "business"
+
+    list_allowed_roles = [
+        BusinessMembership.ROLE_OWNER,
+        BusinessMembership.ROLE_ADMIN,
+        BusinessMembership.ROLE_CASHIER,
     ]
 
     read_roles = [
@@ -4066,20 +4182,20 @@ class CashRegisterViewSet(
         queryset = super().get_queryset()
         user = self.request.user
 
-        if user.is_superuser:
-            return queryset
-
-        return (
-            queryset
-            .filter(
-                business__memberships__user=user,
-                business__memberships__is_active=True,
-                business__memberships__role__in=(
-                    self.read_roles
-                ),
+        if not user.is_superuser:
+            queryset = (
+                queryset
+                .filter(
+                    business__memberships__user=user,
+                    business__memberships__is_active=True,
+                    business__memberships__role__in=(
+                        self.read_roles
+                    ),
+                )
+                .distinct()
             )
-            .distinct()
-        )
+
+        return queryset
 
     def _validate_cash_access(
         self,
@@ -4374,6 +4490,7 @@ class CashRegisterViewSet(
     ),
 )
 class CashMovementViewSet(
+    RequireBusinessPublicIdListMixin,
     viewsets.GenericViewSet,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
@@ -4404,13 +4521,23 @@ class CashMovementViewSet(
         StandardResultsSetPagination
     )
 
-    filterset_fields = [
-        "cash_register__public_id",
-        "cash_register__business__public_id",
-        "employee__public_id",
-        "payment_method__public_id",
-        "movement_type",
-    ]
+    public_id_filter_fields = {
+        "cash_register_public_id": (
+            "cash_register__public_id"
+        ),
+        "employee_public_id": (
+            "employee__public_id"
+        ),
+        "payment_method_public_id": (
+            "payment_method__public_id"
+        ),
+    }
+
+    simple_filter_fields = {
+        "movement_type": filters.CharFilter(
+            field_name="movement_type",
+        ),
+    }
 
     ordering_fields = [
         "created_at",
@@ -4422,12 +4549,22 @@ class CashMovementViewSet(
         "-created_at",
     ]
 
-    allowed_roles = [
+    business_lookup = (
+        "cash_register__business"
+    )
+
+    list_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
         BusinessMembership.ROLE_ADMIN,
         BusinessMembership.ROLE_CASHIER,
     ]
 
+    allowed_roles = [
+        BusinessMembership.ROLE_OWNER,
+        BusinessMembership.ROLE_ADMIN,
+        BusinessMembership.ROLE_CASHIER,
+    ]
+    
     def get_queryset(self):
         queryset = super().get_queryset()
         user = self.request.user
@@ -4617,6 +4754,7 @@ class MonthlySummaryView(
     ),
 )
 class MonthlyClosureViewSet(
+    RequireBusinessPublicIdListMixin,
     viewsets.GenericViewSet,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
@@ -4647,13 +4785,20 @@ class MonthlyClosureViewSet(
         StandardResultsSetPagination
     )
 
-    filterset_fields = [
-        "business__public_id",
-        "year",
-        "month",
-        "version",
-        "status",
-    ]
+    simple_filter_fields = {
+        "year": filters.NumberFilter(
+            field_name="year",
+        ),
+        "month": filters.NumberFilter(
+            field_name="month",
+        ),
+        "version": filters.NumberFilter(
+            field_name="version",
+        ),
+        "status": filters.CharFilter(
+            field_name="status",
+        ),
+    }
 
     ordering_fields = [
         "year",
@@ -4674,6 +4819,13 @@ class MonthlyClosureViewSet(
         BusinessMembership.ROLE_ADMIN,
     ]
 
+    business_lookup = "business"
+
+    list_allowed_roles = [
+        BusinessMembership.ROLE_OWNER,
+        BusinessMembership.ROLE_ADMIN,
+    ]
+    
     def get_serializer_class(self):
         if self.action == "create":
             return (

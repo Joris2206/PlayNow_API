@@ -7,7 +7,6 @@ from core.tests.factories import (
     create_role_user, create_status, create_user,
 )
 
-
 class RolePermissionTests(APITestCase):
     @classmethod
     def setUpTestData(cls):
@@ -39,7 +38,9 @@ class RolePermissionTests(APITestCase):
 
     def product_payload(self, title):
         return {
-            "business": str(self.business.public_id),
+            "business_public_id": str(
+                self.business.public_id
+            ),
             "title": title,
             "description": "",
             "image_url": "",
@@ -71,7 +72,7 @@ class RolePermissionTests(APITestCase):
                 response = self.client.post(
                     "/api/products/", self.product_payload(title), format="json"
                 )
-                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+                self.assertEqual(response.status_code, status.HTTP_201_CREATED, msg=response.data,)
 
     def test_cashier_seller_viewer_cannot_create_product(self):
         cases = [self.cashier, self.seller, self.viewer]
@@ -83,7 +84,7 @@ class RolePermissionTests(APITestCase):
                     self.product_payload(f"Forbidden {user.pk}"),
                     format="json",
                 )
-                self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+                self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN, msg=response.data,)
 
     def test_cashier_and_seller_can_create_sale(self):
         for user in [self.cashier, self.seller]:
