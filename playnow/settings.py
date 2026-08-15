@@ -178,7 +178,7 @@ REST_FRAMEWORK = {
 
     "DEFAULT_FILTER_BACKENDS": [
         "core.filters.PublicIdFilterBackend",
-        "rest_framework.filters.SearchFilter",
+        "core.filters.ConfiguredSearchFilter",
         "rest_framework.filters.OrderingFilter",
     ],
     "DEFAULT_PAGINATION_CLASS": "core.pagination.StandardResultsSetPagination",

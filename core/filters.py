@@ -4,6 +4,23 @@ from .models import StockMovement, Transaction
 from django_filters.rest_framework import (
     DjangoFilterBackend,
 )
+from rest_framework.filters import SearchFilter
+
+
+class ConfiguredSearchFilter(SearchFilter):
+    """
+    Only advertise search when the view declares searchable fields.
+
+    DRF safely ignores ``search`` when ``search_fields`` is absent, but its
+    default schema parameter still suggests that the query parameter works.
+    """
+
+    def get_schema_operation_parameters(self, view):
+        if not getattr(view, "search_fields", None):
+            return []
+
+        return super().get_schema_operation_parameters(view)
+
 
 class TransactionFilter(
     filters.FilterSet

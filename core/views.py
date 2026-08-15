@@ -1562,6 +1562,8 @@ class BusinessViewSet(
         ),
     }
 
+    search_fields = ["business_name"]
+
     permission_classes = [
         IsAuthenticated,
     ]
@@ -2191,6 +2193,7 @@ class PublicProductVariantTypeViewSet(
             "product__public_id"
         ),
     }
+    search_fields = ["name"]
     ordering_fields = ["name"]
     ordering = ["name"]
 
@@ -2240,6 +2243,7 @@ class PublicProductVariantViewSet(
             "variant_type__public_id"
         ),
     }
+    search_fields = ["label"]
     ordering_fields = ["label", "additional_price"]
     ordering = ["label"]
     
@@ -2293,6 +2297,8 @@ class ProductCategoryViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
             "status__public_id"
         ),
     }
+
+    search_fields = ["name"]
 
 
 @extend_schema_view(
@@ -2404,10 +2410,15 @@ class ProductVariantTypeViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     pagination_class = StandardResultsSetPagination
 
     public_id_filter_fields = {
+        "product_public_id": (
+            "product__public_id"
+        ),
         "status_public_id": (
             "status__public_id"
         ),
     }
+
+    search_fields = ["name"]
 
 
 @extend_schema_view(
@@ -2455,10 +2466,18 @@ class ProductVariantViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     pagination_class = StandardResultsSetPagination
 
     public_id_filter_fields = {
+        "variant_type_public_id": (
+            "variant_type__public_id"
+        ),
+        "product_public_id": (
+            "variant_type__product__public_id"
+        ),
         "status_public_id": (
             "status__public_id"
         ),
     }
+
+    search_fields = ["label"]
 
 
 @extend_schema_view(
@@ -2496,7 +2515,7 @@ class EmployeeViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         ),
     }
     
-    search_fields = ["full_name", "phone"]
+    search_fields = ["full_name", "email", "phone"]
     ordering_fields = ["full_name", "created_at", "updated_at"]
     ordering = ["-created_at"]
 
@@ -2654,6 +2673,8 @@ class PaymentMethodViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
             "status__public_id"
         ),
     }
+
+    search_fields = ["name"]
 
 
 @extend_schema_view(
@@ -3173,6 +3194,8 @@ class NotificationViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         ),
     }
 
+    search_fields = ["title"]
+
 
 @extend_schema_view(
     list=extend_schema(tags=["Reminders"]),
@@ -3202,6 +3225,8 @@ class ReminderViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
             "status__public_id"
         ),
     }
+
+    search_fields = ["title"]
 
 
 @extend_schema_view(
@@ -3262,6 +3287,8 @@ class GoalViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
             "status__public_id"
         ),
     }
+
+    search_fields = ["name"]
 
 @extend_schema_view(
     list=extend_schema(tags=["Goal Progress"]),
