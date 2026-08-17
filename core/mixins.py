@@ -55,6 +55,15 @@ class SoftDeleteByStatusMixin:
     ):
         instance = self.get_object()
 
+        validator = getattr(
+            self,
+            "validate_destroy_access",
+            None,
+        )
+
+        if validator:
+            validator(instance)
+
         status_obj = (
             self._get_soft_delete_status()
         )
@@ -84,15 +93,6 @@ class SoftDeleteByStatusMixin:
                     drf_status.HTTP_409_CONFLICT
                 ),
             )
-
-        validator = getattr(
-            self,
-            "validate_destroy_access",
-            None,
-        )
-
-        if validator:
-            validator(instance)
 
         # Primero ejecuta los efectos secundarios.
         # Si fallan, no se cambia el estado.

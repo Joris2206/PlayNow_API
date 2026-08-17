@@ -17,14 +17,13 @@ from core.models import (
     PaymentMethod,
     Product,
     ProductCategory,
-    ProductVariant,
-    ProductVariantType,
     StockMovement,
     Supplier,
     Transaction,
     TransactionDetail,
     User,
 )
+from core.services.inventory import record_stock_movement
 
 _sequence = count(1)
 
@@ -170,26 +169,6 @@ def create_product(*, business, status=None, category=None, title=None, base_pri
     )
 
 
-def create_variant_type(*, product, status=None, name=None):
-    n = next_number()
-    return ProductVariantType.objects.create(
-        product=product,
-        name=name or f"Tipo {n}",
-        status=status or create_status(),
-    )
-
-
-def create_variant(*, variant_type, status=None, label=None, additional_price=Decimal("0.00"), stock=10):
-    n = next_number()
-    return ProductVariant.objects.create(
-        variant_type=variant_type,
-        label=label or f"Variante {n}",
-        additional_price=additional_price,
-        stock=stock,
-        status=status or create_status(),
-    )
-
-
 def create_customer(*, business, status=None, full_name=None):
     n = next_number()
     return Customer.objects.create(
@@ -274,11 +253,10 @@ def create_transaction(
     return tx
 
 
-def create_transaction_detail(*, transaction, product, variant=None, quantity=1, unit_price=Decimal("100.00")):
+def create_transaction_detail(*, transaction, product, quantity=1, unit_price=Decimal("100.00")):
     return TransactionDetail.objects.create(
         transaction=transaction,
         product=product,
-        variant=variant,
         quantity=quantity,
         unit_price=unit_price,
         total_price=unit_price * quantity,
@@ -436,21 +414,19 @@ def create_stock_movement(
     created_by,
     movement_type,
     quantity,
-    variant=None,
     transaction=None,
     transaction_detail=None,
     note="Movimiento de inventario de prueba",
     created_at=None,
 ):
-    movement = StockMovement.objects.create(
+    movement = record_stock_movement(
         product=product,
-        variant=variant,
         transaction=transaction,
         transaction_detail=(
             transaction_detail
         ),
         note=note,
-        type=movement_type,
+        movement_type=movement_type,
         quantity=quantity,
         created_by=created_by,
     )

@@ -4,6 +4,7 @@ from rest_framework import status
 
 from core.models import (
     BusinessMembership,
+    StockMovement,
     Transaction,
 )
 from core.tests.base import BusinessIsolationTestCase
@@ -187,6 +188,13 @@ class TransactionUpdateTests(
     def test_cannot_replace_transaction_details(
         self,
     ):
+        self.product.refresh_from_db()
+        original_stock = self.product.stock
+        original_movement_ids = set(
+            StockMovement.objects.filter(
+                transaction=self.transaction,
+            ).values_list("pk", flat=True)
+        )
         original_detail_ids = set(
             self.transaction.details.values_list(
                 "pk",
@@ -226,6 +234,29 @@ class TransactionUpdateTests(
             current_detail_ids,
             original_detail_ids,
         )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, original_stock)
+        self.assertEqual(
+            set(
+                StockMovement.objects.filter(
+                    transaction=self.transaction,
+                ).values_list("pk", flat=True)
+            ),
+            original_movement_ids,
+        )
+
+    def test_transaction_details_have_no_direct_api(self):
+        for method in ("post", "put", "patch", "delete"):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(
+                    "/api/transaction-details/",
+                    {},
+                    format="json",
+                )
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_404_NOT_FOUND,
+                )
 
     def test_cannot_change_payment_status_directly(
         self,

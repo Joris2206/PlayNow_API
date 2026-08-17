@@ -3,7 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     CommissionSettlementViewSet, CurrentUserView, CustomerSummaryView, DebtSummaryView, InventorySummaryView, SupplierSummaryView, healthcheck, RegisterViewSet,
     BusinessViewSet, EntityStatusViewSet,
-    ProductCategoryViewSet, ProductViewSet, ProductVariantTypeViewSet, ProductVariantViewSet,
+    ProductCategoryViewSet, ProductViewSet,
     EmployeeViewSet, CustomerViewSet, SupplierViewSet, PaymentMethodViewSet,
     TransactionViewSet, DebtViewSet, DebtPaymentViewSet,
     NotificationViewSet, ReminderViewSet,
@@ -12,8 +12,7 @@ from .views import (
     EmployeeCommissionPlanViewSet, EmployeeCommissionPreviewView, EmployeeSalesReportView,
     CashMovementViewSet, CashRegisterViewSet, MonthlySummaryView, MonthlyClosureViewSet, PaymentSummaryView,
     DashboardOverviewView,
-    PublicProductCategoryViewSet, PublicProductViewSet,
-    PublicProductVariantTypeViewSet, PublicProductVariantViewSet
+    PublicProductCategoryViewSet, PublicProductViewSet
 )
 
 router = DefaultRouter()
@@ -31,8 +30,6 @@ router.register(r'businesses', BusinessViewSet, basename='business')
 # productos
 router.register(r'categories', ProductCategoryViewSet, basename='product-category')
 router.register(r'products', ProductViewSet, basename='product')
-router.register(r'variant-types', ProductVariantTypeViewSet, basename='product-variant-type')
-router.register(r'variants', ProductVariantViewSet, basename='product-variant')
 
 # entidades
 router.register(r'employees', EmployeeViewSet, basename='employee')
@@ -72,8 +69,6 @@ router.register(r'monthly-closures', MonthlyClosureViewSet, basename='monthly-cl
 
 public_router.register(r'categories', PublicProductCategoryViewSet, basename='public-product-category')
 public_router.register(r'products', PublicProductViewSet, basename='public-product')
-public_router.register(r'variant-types', PublicProductVariantTypeViewSet, basename='public-product-variant-type')
-public_router.register(r'variants', PublicProductVariantViewSet, basename='public-product-variant')
 
 urlpatterns = [
     path(

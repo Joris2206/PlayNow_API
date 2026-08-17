@@ -8,4 +8,3 @@ class CoreConfig(AppConfig):
     def ready(self):
         # Importa la extensión para que drf-spectacular la registre
         from . import schema  # noqa
-        from . import signals

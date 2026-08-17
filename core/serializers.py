@@ -8,7 +8,7 @@ from rest_framework import serializers
 from core.utils import calculate_employee_advance_summary
 from .models import (
     BusinessMembership, MonthlyClosure, User, Business, EntityStatus,
-    ProductCategory, Product, ProductVariantType, ProductVariant,
+    ProductCategory, Product,
     Employee, Customer, Supplier, PaymentMethod,
     Transaction, TransactionDetail, StockMovement,
     Debt, DebtPayment, Notification, Reminder,
@@ -564,6 +564,18 @@ class ProductSerializer(
         )
     
     def validate(self, attrs):
+        if (
+            self.instance is not None
+            and "stock" in attrs
+            and attrs["stock"] != self.instance.stock
+        ):
+            raise serializers.ValidationError({
+                "stock": (
+                    "El stock de un producto existente solo puede "
+                    "cambiar mediante movimientos de inventario."
+                )
+            })
+
         business = attrs.get(
             "business",
             getattr(self.instance, "business", None),
@@ -585,76 +597,6 @@ class ProductSerializer(
             })
 
         return attrs
-
-class ProductVariantTypeSerializer(
-    DefaultActiveStatusMixin,
-    serializers.ModelSerializer,
-):
-    product_public_id = public_id_field(
-        Product,
-        source="product",
-    )
-    product_name= related_name_field("product.title")
-    status_public_id = public_id_field(
-        EntityStatus,
-        source="status",
-        required=False,
-    )
-    status_name = related_name_field("status.name")
-    class Meta:
-        model = ProductVariantType
-        fields = (
-            "public_id",
-            "product_public_id",
-            "product_name",
-            "name",
-            "status_public_id",
-            "status_name",
-            "created_at",
-            "updated_at",
-        )
-        read_only_fields = (
-            "public_id",
-            "created_at",
-            "updated_at",
-        )
-
-class ProductVariantSerializer(
-    DefaultActiveStatusMixin,
-    serializers.ModelSerializer,
-):
-    variant_type_public_id = public_id_field(
-        ProductVariantType,
-        source="variant_type",
-    )
-    variant_type_name = related_name_field("variant_type.name")
-    status_public_id = public_id_field(
-        EntityStatus,
-        source="status",
-        required=False,
-    )
-    status_name = related_name_field("status.name")
-    product_name = related_name_field("variant_type.product.title")
-    class Meta:
-        model = ProductVariant
-        fields = (
-            "public_id",
-            "variant_type_public_id",
-            "variant_type_name",
-            "label",
-            "additional_price",
-            "stock",
-            "status_public_id",
-            "status_name",
-            "product_name",
-            "created_at",
-            "updated_at",
-        )
-        read_only_fields = (
-            "public_id",
-            "created_at",
-            "updated_at",
-        )
 
 class PublicProductCategorySerializer(
     serializers.ModelSerializer,
@@ -702,56 +644,6 @@ class PublicProductSerializer(
         )
         read_only_fields = fields
 
-class PublicProductVariantTypeSerializer(
-    serializers.ModelSerializer,
-):
-    product_public_id = public_id_read_only(
-        source="product",
-    )
-    product_name = related_name_field(
-        "product.title",
-    )
-
-    class Meta:
-        model = ProductVariantType
-        fields = (
-            "public_id",
-            "product_public_id",
-            "product_name",
-            "name",
-        )
-        read_only_fields = fields
-
-class PublicProductVariantSerializer(
-    serializers.ModelSerializer,
-):
-    variant_type_public_id = public_id_read_only(
-        source="variant_type",
-    )
-    variant_type_name = related_name_field(
-        "variant_type.name",
-    )
-    product_public_id = public_id_read_only(
-        source="variant_type.product",
-    )
-    product_name = related_name_field(
-        "variant_type.product.title",
-    )
-
-    class Meta:
-        model = ProductVariant
-        fields = (
-            "public_id",
-            "variant_type_public_id",
-            "variant_type_name",
-            "product_public_id",
-            "product_name",
-            "label",
-            "additional_price",
-            "stock",
-        )
-        read_only_fields = fields
-
 class EmployeeSerializer(
     DefaultActiveStatusMixin,
     serializers.ModelSerializer,
@@ -774,6 +666,19 @@ class EmployeeSerializer(
             "created_at",
             "updated_at",
         )
+
+
+class EmployeeSelectionSerializer(serializers.ModelSerializer):
+    """Minimal employee identity exposed to operational sales roles."""
+
+    class Meta:
+        model = Employee
+        fields = (
+            "public_id",
+            "full_name",
+            "position",
+        )
+        read_only_fields = fields
 
 class CustomerSerializer(
     DefaultActiveStatusMixin,
@@ -829,13 +734,6 @@ class TransactionDetailSerializer(
         source="product",
     )
 
-    variant_public_id = public_id_field(
-        ProductVariant,
-        source="variant",
-        required=False,
-        allow_null=True,
-    )
-
     quantity = serializers.IntegerField(
         min_value=1,
         max_value=100_000,
@@ -853,12 +751,6 @@ class TransactionDetailSerializer(
         read_only=True,
     )
 
-    variant_name = serializers.CharField(
-        source="variant.label",
-        read_only=True,
-        allow_null=True,
-    )
-
     class Meta:
         model = TransactionDetail
 
@@ -866,8 +758,6 @@ class TransactionDetailSerializer(
             "public_id",
             "product_public_id",
             "product_name",
-            "variant_public_id",
-            "variant_name",
             "quantity",
             "unit_price",
             "total_price",
@@ -876,7 +766,6 @@ class TransactionDetailSerializer(
         read_only_fields = (
             "public_id",
             "product_name",
-            "variant_name",
             "total_price",
         )
 
@@ -1265,25 +1154,6 @@ class TransactionSerializer(
                     )
                 })
 
-            variant = detail.get("variant")
-
-            if (
-                self.instance is None
-                and variant is not None
-                and (
-                    variant.status.name.casefold()
-                    != "activo"
-                    or variant.variant_type.status.name.casefold()
-                    != "activo"
-                )
-            ):
-                raise serializers.ValidationError({
-                    "details": (
-                        f"Detalle #{index}: la variante o su tipo "
-                        "no se encuentra Activo."
-                    )
-                })
-
     def _validate_expense_discount(
         self,
         attrs,
@@ -1400,7 +1270,6 @@ class TransactionSerializer(
             start=1,
         ):
             product = detail.get("product")
-            variant = detail.get("variant")
             quantity = detail.get("quantity")
             unit_price = detail.get("unit_price")
 
@@ -1426,43 +1295,6 @@ class TransactionSerializer(
                 raise serializers.ValidationError(
                     f"Detalle #{index}: unit_price no "
                     "puede ser negativo."
-                )
-
-            if (
-                variant is not None
-                and variant.variant_type.product_id
-                != product.id
-            ):
-                raise serializers.ValidationError(
-                    f"Detalle #{index}: la variante no "
-                    "pertenece al producto indicado."
-                )
-
-            has_variants = (
-                product.variant_types
-                .filter(
-                    variants__isnull=False,
-                )
-                .exists()
-            )
-
-            if (
-                has_variants
-                and variant is None
-            ):
-                raise serializers.ValidationError(
-                    f"Detalle #{index}: el producto "
-                    "utiliza variantes. Debes seleccionar "
-                    "una variante."
-                )
-
-            if (
-                not has_variants
-                and variant is not None
-            ):
-                raise serializers.ValidationError(
-                    f"Detalle #{index}: este producto "
-                    "no administra stock mediante variantes."
                 )
 
         return value
@@ -1619,7 +1451,6 @@ class TransactionSerializer(
             start=1,
         ):
             product = detail_data["product"]
-            variant = detail_data.get("variant")
             quantity = detail_data["quantity"]
             unit_price = detail_data.get("unit_price")
 
@@ -1627,16 +1458,7 @@ class TransactionSerializer(
                 if transaction.type == "purchase":
                     unit_price = product.base_cost
                 else:
-                    additional_price = (
-                        variant.additional_price
-                        if variant is not None
-                        else Decimal("0.00")
-                    )
-
-                    unit_price = (
-                        product.base_price
-                        + additional_price
-                    )    
+                    unit_price = product.base_price
 
             if unit_price < Decimal("0.00"):
                 raise serializers.ValidationError({
@@ -1650,7 +1472,6 @@ class TransactionSerializer(
                 TransactionDetail.objects.create(
                     transaction=transaction,
                     product=product,
-                    variant=variant,
                     quantity=quantity,
                     unit_price=unit_price,
                     total_price=Decimal("0.00"),
@@ -3161,12 +2982,6 @@ class StockMovementSerializer(serializers.ModelSerializer):
         source="product",
     )
     product_name = related_name_field("product.title")
-    variant_public_id = public_id_read_only(
-        source="variant",
-        allow_null=True,
-    )
-    variant_name = related_name_field("variant.label", allow_null=True)
-    variant_type_name = related_name_field("variant.variant_type.name", allow_null=True)
     transaction_public_id = public_id_read_only(
         source="transaction",
         allow_null=True,
@@ -3187,9 +3002,6 @@ class StockMovementSerializer(serializers.ModelSerializer):
             "public_id",
             "product_public_id",
             "product_name",
-            "variant_public_id",
-            "variant_name",
-            "variant_type_name",
             "transaction_public_id",
             "transaction_detail_public_id",
             "note",
@@ -3273,13 +3085,6 @@ class InventorySummaryQuerySerializer(
         )
     )
 
-    variant_public_id = (
-        serializers.UUIDField(
-            required=False,
-            allow_null=True,
-        )
-    )
-
     def validate(self, attrs):
         if (
             attrs["date_from"]
@@ -3289,19 +3094,6 @@ class InventorySummaryQuerySerializer(
                 "date_to": (
                     "La fecha final no puede ser "
                     "anterior a la fecha inicial."
-                )
-            })
-
-        if (
-            attrs.get("variant_public_id")
-            is not None
-            and attrs.get("product_public_id")
-            is None
-        ):
-            raise serializers.ValidationError({
-                "product_public_id": (
-                    "Debes indicar el producto "
-                    "cuando filtras por variante."
                 )
             })
 
@@ -3348,6 +3140,9 @@ class CurrentMembershipSerializer(
     business_public_id = serializers.UUIDField()
     business_name = serializers.CharField()
     role = serializers.CharField()
+    employee_public_id = serializers.UUIDField(
+        allow_null=True,
+    )
 
 
 class CurrentUserSerializer(

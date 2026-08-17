@@ -7,8 +7,6 @@ from .models import (
     EntityStatus,
     ProductCategory,
     Product,
-    ProductVariantType,
-    ProductVariant,
     Employee,
     Customer,
     Supplier,
@@ -275,71 +273,14 @@ class ProductAdmin(admin.ModelAdmin):
         "status",
     )
 
-
-@admin.register(ProductVariantType)
-class ProductVariantTypeAdmin(admin.ModelAdmin):
-    list_display = (
-        "name",
-        "product",
-        "status",
-        "created_at",
-    )
-
-    search_fields = (
-        "name",
-        "product__title",
-        "product__business__business_name",
-        "public_id",
-    )
-
-    list_filter = (
-        "status",
-    )
-
-    readonly_fields = (
-        "public_id",
-        "created_at",
-        "updated_at",
-    )
-
-    list_select_related = (
-        "product",
-        "status",
-    )
-
-
-@admin.register(ProductVariant)
-class ProductVariantAdmin(admin.ModelAdmin):
-    list_display = (
-        "label",
-        "variant_type",
-        "additional_price",
-        "stock",
-        "status",
-        "created_at",
-    )
-
-    list_filter = (
-        "status",
-    )
-
-    search_fields = (
-        "label",
-        "variant_type__name",
-        "variant_type__product__title",
-        "public_id",
-    )
-
-    readonly_fields = (
-        "public_id",
-        "created_at",
-        "updated_at",
-    )
-
-    list_select_related = (
-        "variant_type",
-        "status",
-    )
+    def get_readonly_fields(self, request, obj=None):
+        readonly_fields = super().get_readonly_fields(
+            request,
+            obj,
+        )
+        if obj is not None:
+            return (*readonly_fields, "stock")
+        return readonly_fields
 
 
 # ---------------------------------------------------------------------
@@ -465,7 +406,6 @@ class TransactionDetailInline(admin.TabularInline):
 
     fields = (
         "product",
-        "variant",
         "quantity",
         "unit_price",
         "total_price",
@@ -533,7 +473,6 @@ class TransactionDetailAdmin(admin.ModelAdmin):
     list_display = (
         "transaction",
         "product",
-        "variant",
         "quantity",
         "unit_price",
         "total_price",
@@ -542,7 +481,6 @@ class TransactionDetailAdmin(admin.ModelAdmin):
     search_fields = (
         "transaction__public_id",
         "product__title",
-        "variant__label",
         "public_id",
     )
 
@@ -554,7 +492,6 @@ class TransactionDetailAdmin(admin.ModelAdmin):
     list_select_related = (
         "transaction",
         "product",
-        "variant",
     )
 
 
@@ -935,7 +872,6 @@ class ActivityLogAdmin(admin.ModelAdmin):
 class StockMovementAdmin(admin.ModelAdmin):
     list_display = (
         "product",
-        "variant",
         "transaction",
         "type",
         "quantity",
@@ -949,7 +885,6 @@ class StockMovementAdmin(admin.ModelAdmin):
 
     search_fields = (
         "product__title",
-        "variant__label",
         "transaction__public_id",
         "public_id",
     )
@@ -957,7 +892,6 @@ class StockMovementAdmin(admin.ModelAdmin):
     readonly_fields = (
         "public_id",
         "product",
-        "variant",
         "transaction",
         "transaction_detail",
         "note",
@@ -969,7 +903,6 @@ class StockMovementAdmin(admin.ModelAdmin):
 
     list_select_related = (
         "product",
-        "variant",
         "transaction",
         "transaction_detail",
     )

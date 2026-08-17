@@ -7,7 +7,7 @@ from core.tests.base import BusinessIsolationTestCase
 from core.tests.factories import (
     create_customer, create_payment_method, create_product, create_role_user,
     create_status,
-    create_supplier, create_variant, create_variant_type,
+    create_supplier,
 )
 
 
@@ -46,37 +46,23 @@ class TransactionTests(BusinessIsolationTestCase):
             base_cost=Decimal("60.00"),
             stock=20,
         )
-        cls.variant_product = create_product(
+        cls.second_product = create_product(
             business=cls.business_a,
             status=cls.active_status,
-            title="PS5",
-            base_price=Decimal("850.00"),
+            title="PS5 Pro",
+            base_price=Decimal("1050.00"),
             base_cost=Decimal("560.00"),
-            stock=0,
-        )
-        cls.variant_type = create_variant_type(
-            product=cls.variant_product,
-            status=cls.active_status,
-            name="Modelo",
-        )
-        cls.variant = create_variant(
-            variant_type=cls.variant_type,
-            status=cls.active_status,
-            label="Pro",
-            additional_price=Decimal("200.00"),
             stock=10,
         )
 
     def setUp(self):
         self.authenticate_as(self.cashier_user)
 
-    def sale_payload(self, *, product=None, variant=None, quantity=1):
+    def sale_payload(self, *, product=None, quantity=1):
         detail = {
             "product_public_id": str((product or self.simple_product).public_id),
             "quantity": quantity,
         }
-        if variant is not None:
-            detail["variant_public_id"] = str(variant.public_id)
         return {
             "business_public_id": str(self.business_a.public_id),
             "customer_public_id": str(self.customer.public_id),
@@ -121,27 +107,17 @@ class TransactionTests(BusinessIsolationTestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(Decimal(response.data["total_value"]), Decimal("300.00"))
 
-    def test_variant_sale_uses_base_plus_additional(self):
+    def test_individual_product_uses_its_own_price(self):
         response = self.client.post(
             "/api/transactions/",
             self.sale_payload(
-                product=self.variant_product,
-                variant=self.variant,
+                product=self.second_product,
                 quantity=2,
             ),
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(Decimal(response.data["total_value"]), Decimal("2100.00"))
-
-    def test_product_with_variants_requires_variant(self):
-        response = self.client.post(
-            "/api/transactions/",
-            self.sale_payload(product=self.variant_product, quantity=1),
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("details", response.data)
 
     def test_new_sale_rejects_inactive_product(self):
         inactive_product = create_product(
@@ -165,53 +141,10 @@ class TransactionTests(BusinessIsolationTestCase):
         )
         self.assertIn("details", response.data)
 
-    def test_new_sale_rejects_inactive_variant(self):
-        inactive_variant = create_variant(
-            variant_type=self.variant_type,
-            status=create_status("Inactivo"),
-            label="Inactiva",
-            stock=10,
-        )
-
-        response = self.client.post(
-            "/api/transactions/",
-            self.sale_payload(
-                product=self.variant_product,
-                variant=inactive_variant,
-            ),
-            format="json",
-        )
-
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-        )
-        self.assertIn("details", response.data)
-
-    def test_new_sale_rejects_variant_from_inactive_type(self):
-        self.variant_type.status = create_status("Inactivo")
-        self.variant_type.save(update_fields=["status"])
-
-        response = self.client.post(
-            "/api/transactions/",
-            self.sale_payload(
-                product=self.variant_product,
-                variant=self.variant,
-            ),
-            format="json",
-        )
-
-        self.assertEqual(
-            response.status_code,
-            status.HTTP_400_BAD_REQUEST,
-        )
-        self.assertIn("details", response.data)
-
     def test_sale_can_include_multiple_products(self):
         payload = self.sale_payload(quantity=2)
         payload["details"].append({
-            "product_public_id": str(self.variant_product.public_id),
-            "variant_public_id": str(self.variant.public_id),
+            "product_public_id": str(self.second_product.public_id),
             "quantity": 1,
         })
         response = self.client.post("/api/transactions/", payload, format="json")

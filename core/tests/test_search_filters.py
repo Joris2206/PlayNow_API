@@ -56,8 +56,6 @@ class SearchFilterOpenApiTests(SimpleTestCase):
         "/api/businesses/",
         "/api/categories/",
         "/api/products/",
-        "/api/variant-types/",
-        "/api/variants/",
         "/api/employees/",
         "/api/customers/",
         "/api/suppliers/",
@@ -69,8 +67,6 @@ class SearchFilterOpenApiTests(SimpleTestCase):
         "/api/stock-movements/",
         "/api/public/categories/",
         "/api/public/products/",
-        "/api/public/variant-types/",
-        "/api/public/variants/",
     }
 
     NON_SEARCHABLE_COLLECTION_PATHS = {

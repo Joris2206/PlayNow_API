@@ -327,54 +327,6 @@ class Product(models.Model):
         cat = f" · {self.category.name}" if self.category_id else ""
         return f"{self.title}{cat}"
 
-class ProductVariantType(models.Model):
-    public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variant_types')
-    name = models.CharField(max_length=255)
-    status = models.ForeignKey(
-        EntityStatus,
-        on_delete=models.PROTECT,
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=["product", "name"],
-                name="unique_variant_type_per_product",
-            ),
-        ]
-
-    def __str__(self):
-        return f"{self.product.title} - {self.name}"
-
-class ProductVariant(models.Model):
-    public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
-    variant_type = models.ForeignKey(ProductVariantType, on_delete=models.CASCADE, related_name='variants')
-    label = models.CharField(max_length=255)
-    additional_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    stock = models.IntegerField()
-    status = models.ForeignKey(EntityStatus, on_delete=models.PROTECT)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        constraints = [
-            models.CheckConstraint(
-                condition=models.Q(stock__gte=0),
-                name="variant_stock_gte_0",
-            ),
-            models.UniqueConstraint(
-                fields=["variant_type", "label"],
-                name="unique_variant_label_per_type",
-            ),
-        ]
-
-    def __str__(self):
-        prod = self.variant_type.product.title
-        return f"{self.variant_type.name}: {self.label} · {prod}"
-    
 class Employee(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='employees')
@@ -975,7 +927,6 @@ class TransactionDetail(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     transaction = models.ForeignKey(Transaction, on_delete=models.CASCADE, related_name='details')
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
-    variant = models.ForeignKey(ProductVariant, on_delete=models.SET_NULL, null=True, blank=True)
     quantity = models.PositiveIntegerField()
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
     total_price = models.DecimalField(max_digits=12, decimal_places=2)
@@ -1009,18 +960,6 @@ class TransactionDetail(models.Model):
                 "product": (
                     "El producto debe pertenecer al mismo negocio "
                     "de la transacción."
-                )
-            })
-
-        if (
-            self.variant_id
-            and self.product_id
-            and self.variant.variant_type.product_id
-            != self.product_id
-        ):
-            raise ValidationError({
-                "variant": (
-                    "La variante seleccionada no pertenece al producto."
                 )
             })
 
@@ -1288,7 +1227,6 @@ class ActivityLog(models.Model):
 class StockMovement(models.Model):
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, db_index=True, editable=False)
     product = models.ForeignKey('Product', on_delete=models.PROTECT, related_name='stock_movements')
-    variant = models.ForeignKey('ProductVariant', on_delete=models.SET_NULL, null=True, blank=True, related_name='stock_movements')
     transaction = models.ForeignKey('Transaction', on_delete=models.SET_NULL, null=True, blank=True, related_name='stock_movements')
     note = models.CharField(max_length=255, blank=True)
     type = models.CharField(max_length=20, choices=[('entry', 'Entry'), ('sale', 'Sale'), ('adjustment', 'Adjustment')])
@@ -1311,16 +1249,12 @@ class StockMovement(models.Model):
         indexes = [
             models.Index(fields=["product", "created_at"]),
             models.Index(fields=["transaction", "created_at"]),
-            models.Index(fields=["variant", "created_at"]),
         ]
         ordering = ["-created_at"]
     
     def __str__(self):
         qty = f"{self.quantity:+d}"
-        var = ""
-        if self.variant_id:
-            var = f" · {self.variant.variant_type.name}: {self.variant.label}"
-        return f"{self.type} {qty} · {self.product.title}{var}"
+        return f"{self.type} {qty} · {self.product.title}"
     
 class EmployeeCommissionPlan(models.Model):
     public_id = models.UUIDField(

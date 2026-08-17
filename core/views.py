@@ -13,6 +13,7 @@ from drf_spectacular.utils import (
     OpenApiParameter,
     OpenApiResponse,
     OpenApiTypes,
+    PolymorphicProxySerializer,
     extend_schema,
     extend_schema_view,
 )
@@ -20,6 +21,7 @@ from django_filters import rest_framework as filters
 from core.services.customer_supplier_reports import build_customers_summary, build_suppliers_summary
 from core.services.dashboard import build_dashboard_overview
 from core.services.inventory_report import build_inventory_summary
+from core.services.inventory import record_stock_movement
 from core.services.monthly_summary import build_monthly_summary
 from core.services.payment_debt_reports import build_debts_summary, build_payments_summary
 from .filters import StockMovementFilter, TransactionFilter
@@ -44,6 +46,7 @@ from .serializers import (
     DashboardOverviewQuerySerializer,
     DebtSummaryQuerySerializer,
     EmployeeAccessCreateSerializer,
+    EmployeeSelectionSerializer,
     HealthSerializer,
     InventorySummaryQuerySerializer,
     MonthlyClosureCreateSerializer,
@@ -55,8 +58,6 @@ from .serializers import (
     CurrentUserSerializer,
     PublicProductCategorySerializer,
     PublicProductSerializer,
-    PublicProductVariantSerializer,
-    PublicProductVariantTypeSerializer,
 )
 from datetime import (
     date,
@@ -84,8 +85,6 @@ FRONTEND_RESET_URL = settings.FRONTEND_RESET_URL
 BUSINESS_PUBLIC_ID = "a0507c11-2617-41cd-90eb-da63917a5cdd"
 CATEGORY_PUBLIC_ID = "4276b1bb-82fc-4806-9a5c-de70002e8e41"
 PRODUCT_PUBLIC_ID = "7aa19d16-1915-4cfa-8658-3b967e198c70"
-VARIANT_TYPE_PUBLIC_ID = "664de038-94c0-451c-969f-1ac5c93c6220"
-VARIANT_PUBLIC_ID = "c5067b51-b848-4c5e-98dc-b2cfcf6d63db"
 EMPLOYEE_PUBLIC_ID = "c9fc2d2d-148d-4ab7-9b24-a94389cf0c74"
 CUSTOMER_PUBLIC_ID = "eb659af9-b488-4562-85cb-c4b4130aa607"
 SUPPLIER_PUBLIC_ID = "e4069f25-0208-4094-9609-d7e40db38b27"
@@ -189,26 +188,6 @@ PRODUCT_CREATE_EXAMPLE = OpenApiExample(
     request_only=True,
 )
 
-VARIANT_TYPE_CREATE_EXAMPLE = OpenApiExample(
-    "Crear tipo de variante",
-    value={
-        "product_public_id": PRODUCT_PUBLIC_ID,
-        "name": "Talla",
-    },
-    request_only=True,
-)
-
-VARIANT_CREATE_EXAMPLE = OpenApiExample(
-    "Crear variante",
-    value={
-        "variant_type_public_id": VARIANT_TYPE_PUBLIC_ID,
-        "label": "Talla 38",
-        "additional_price": "0.00",
-        "stock": 8,
-    },
-    request_only=True,
-)
-
 EMPLOYEE_CREATE_EXAMPLE = OpenApiExample(
     "Registrar empleado sin acceso al sistema",
     value={
@@ -269,7 +248,6 @@ TRANSACTION_SALE_EXAMPLE = OpenApiExample(
         "details": [
             {
                 "product_public_id": PRODUCT_PUBLIC_ID,
-                "variant_public_id": VARIANT_PUBLIC_ID,
                 "quantity": 2,
                 "unit_price": "850.00",
             }
@@ -295,7 +273,6 @@ TRANSACTION_PURCHASE_EXAMPLE = OpenApiExample(
         "details": [
             {
                 "product_public_id": PRODUCT_PUBLIC_ID,
-                "variant_public_id": VARIANT_PUBLIC_ID,
                 "quantity": 12,
                 "unit_price": "560.00",
             }
@@ -429,7 +406,7 @@ GOAL_PROGRESS_CREATE_EXAMPLE = OpenApiExample(
 
 from .models import (
     BusinessMembership, CashRegister, MonthlyClosure, User, Business, EntityStatus,
-    ProductCategory, Product, ProductVariantType, ProductVariant,
+    ProductCategory, Product,
     Employee, Customer, Supplier, PaymentMethod,
     Transaction, TransactionDetail, StockMovement,
     Debt, DebtPayment, Notification, Reminder,
@@ -438,7 +415,7 @@ from .models import (
 from .serializers import (
     UserSerializer, RegisterSerializer,
     BusinessSerializer, EntityStatusSerializer,
-    ProductCategorySerializer, ProductSerializer, ProductVariantTypeSerializer, ProductVariantSerializer,
+    ProductCategorySerializer, ProductSerializer,
     EmployeeSerializer, CustomerSerializer, SupplierSerializer, PaymentMethodSerializer,
     TransactionSerializer, TransactionDetailSerializer, StockMovementSerializer,
     DebtSerializer, DebtPaymentSerializer, NotificationSerializer, ReminderSerializer,
@@ -1111,11 +1088,7 @@ class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelView
         """
         Obtiene el negocio relacionado usando validated_data.
 
-        Soporta:
-
-            business_lookup = "business"
-            business_lookup = "product__business"
-            business_lookup = "variant_type__product__business"
+        Soporta relaciones directas e indirectas hacia Business.
 
         En actualizaciones parciales, si la relación principal no viene,
         utiliza la instancia existente.
@@ -1180,13 +1153,6 @@ class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelView
         Product:
             business_lookup = "business"
 
-        ProductVariantType:
-            business_lookup = "product__business"
-
-        ProductVariant:
-            business_lookup = (
-                "variant_type__product__business"
-            )
         """
 
         user = self.request.user
@@ -2159,96 +2125,6 @@ class PublicProductViewSet(
 
 
 @extend_schema_view(
-    list=extend_schema(
-        tags=["Public Catalog"],
-        parameters=[PUBLIC_CATALOG_BUSINESS_PARAMETER],
-        description=(
-            "Lista tipos de variante Activos de productos públicos."
-        ),
-    ),
-    retrieve=extend_schema(
-        tags=["Public Catalog"],
-        parameters=[PUBLIC_CATALOG_BUSINESS_PARAMETER],
-        description=(
-            "Obtiene un tipo de variante Activo de un producto público."
-        ),
-    ),
-)
-class PublicProductVariantTypeViewSet(
-    PublicCatalogViewSet,
-):
-    queryset = (
-        ProductVariantType.objects
-        .select_related("product", "product__business")
-        .filter(
-            status__name__iexact="Activo",
-            product__status__name__iexact="Activo",
-            product__is_visible=True,
-        )
-    )
-    serializer_class = PublicProductVariantTypeSerializer
-    business_lookup = "product__business"
-    public_id_filter_fields = {
-        "product_public_id": (
-            "product__public_id"
-        ),
-    }
-    search_fields = ["name"]
-    ordering_fields = ["name"]
-    ordering = ["name"]
-
-
-@extend_schema_view(
-    list=extend_schema(
-        tags=["Public Catalog"],
-        parameters=[PUBLIC_CATALOG_BUSINESS_PARAMETER],
-        description=(
-            "Lista variantes Activas de productos públicos."
-        ),
-    ),
-    retrieve=extend_schema(
-        tags=["Public Catalog"],
-        parameters=[PUBLIC_CATALOG_BUSINESS_PARAMETER],
-        description=(
-            "Obtiene una variante Activa de un producto público."
-        ),
-    ),
-)
-class PublicProductVariantViewSet(
-    PublicCatalogViewSet,
-):
-    queryset = (
-        ProductVariant.objects
-        .select_related(
-            "variant_type",
-            "variant_type__product",
-            "variant_type__product__business",
-        )
-        .filter(
-            status__name__iexact="Activo",
-            variant_type__status__name__iexact="Activo",
-            variant_type__product__status__name__iexact=(
-                "Activo"
-            ),
-            variant_type__product__is_visible=True,
-        )
-    )
-    serializer_class = PublicProductVariantSerializer
-    business_lookup = "variant_type__product__business"
-    public_id_filter_fields = {
-        "product_public_id": (
-            "variant_type__product__public_id"
-        ),
-        "variant_type_public_id": (
-            "variant_type__public_id"
-        ),
-    }
-    search_fields = ["label"]
-    ordering_fields = ["label", "additional_price"]
-    ordering = ["label"]
-    
-
-@extend_schema_view(
     list=extend_schema(tags=["Product Categories"]),
     retrieve=extend_schema(tags=["Product Categories"]),
     create=extend_schema(
@@ -2366,123 +2242,39 @@ class ProductViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 
 
 @extend_schema_view(
-    list=extend_schema(tags=["Product Variant Types"]),
-    retrieve=extend_schema(tags=["Product Variant Types"]),
-    create=extend_schema(
-        tags=["Product Variant Types"],
-        description="Crea un tipo de variante, por ejemplo talla o color.",
-        examples=[VARIANT_TYPE_CREATE_EXAMPLE],
+    list=extend_schema(
+        tags=["Employees"],
+        description=(
+            "Owner y admin reciben el contrato administrativo completo. "
+            "Cashier y seller reciben exclusivamente public_id, full_name "
+            "y position para seleccionar al responsable de una venta."
+        ),
+        responses=PolymorphicProxySerializer(
+            component_name="EmployeeRead",
+            serializers=[
+                EmployeeSerializer,
+                EmployeeSelectionSerializer,
+            ],
+            resource_type_field_name=None,
+            many=True,
+        ),
     ),
-    update=extend_schema(tags=["Product Variant Types"]),
-    partial_update=extend_schema(tags=["Product Variant Types"]),
-    destroy=extend_schema(tags=["Product Variant Types"]),
-)
-class ProductVariantTypeViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
-    queryset = ProductVariantType.objects.select_related("product", "product__business", "status").order_by("-created_at", "-id")
-    serializer_class = ProductVariantTypeSerializer
-
-    business_lookup = "product__business"
-
-    read_allowed_roles = [
-        BusinessMembership.ROLE_OWNER,
-        BusinessMembership.ROLE_ADMIN,
-        BusinessMembership.ROLE_CASHIER,
-        BusinessMembership.ROLE_SELLER,
-        BusinessMembership.ROLE_INVENTORY,
-        BusinessMembership.ROLE_VIEWER,
-    ]
-
-    create_allowed_roles = [
-        BusinessMembership.ROLE_OWNER,
-        BusinessMembership.ROLE_ADMIN,
-        BusinessMembership.ROLE_INVENTORY,
-    ]
-
-    update_allowed_roles = create_allowed_roles
-
-    destroy_allowed_roles = [
-        BusinessMembership.ROLE_OWNER,
-        BusinessMembership.ROLE_ADMIN,
-    ]
-
-    lookup_field = "public_id"
-    lookup_url_kwarg = "public_id"
-    pagination_class = StandardResultsSetPagination
-
-    public_id_filter_fields = {
-        "product_public_id": (
-            "product__public_id"
+    retrieve=extend_schema(
+        tags=["Employees"],
+        description=(
+            "Owner y admin reciben el contrato administrativo completo. "
+            "Cashier y seller reciben exclusivamente public_id, full_name "
+            "y position."
         ),
-        "status_public_id": (
-            "status__public_id"
+        responses=PolymorphicProxySerializer(
+            component_name="EmployeeRead",
+            serializers=[
+                EmployeeSerializer,
+                EmployeeSelectionSerializer,
+            ],
+            resource_type_field_name=None,
         ),
-    }
-
-    search_fields = ["name"]
-
-
-@extend_schema_view(
-    list=extend_schema(tags=["Product Variants"]),
-    retrieve=extend_schema(tags=["Product Variants"]),
-    create=extend_schema(
-        tags=["Product Variants"],
-        description="Crea una opción concreta de variante para un producto.",
-        examples=[VARIANT_CREATE_EXAMPLE],
     ),
-    update=extend_schema(tags=["Product Variants"]),
-    partial_update=extend_schema(tags=["Product Variants"]),
-    destroy=extend_schema(tags=["Product Variants"]),
-)
-class ProductVariantViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
-    queryset = ProductVariant.objects.select_related("variant_type", "variant_type__product", "variant_type__product__business", "status").order_by("-created_at", "-id")
-    serializer_class = ProductVariantSerializer
-
-    business_lookup = "variant_type__product__business"
-
-    read_allowed_roles = [
-        BusinessMembership.ROLE_OWNER,
-        BusinessMembership.ROLE_ADMIN,
-        BusinessMembership.ROLE_CASHIER,
-        BusinessMembership.ROLE_SELLER,
-        BusinessMembership.ROLE_INVENTORY,
-        BusinessMembership.ROLE_VIEWER,
-    ]
-
-    create_allowed_roles = [
-        BusinessMembership.ROLE_OWNER,
-        BusinessMembership.ROLE_ADMIN,
-        BusinessMembership.ROLE_INVENTORY,
-    ]
-
-    update_allowed_roles = create_allowed_roles
-
-    destroy_allowed_roles = [
-        BusinessMembership.ROLE_OWNER,
-        BusinessMembership.ROLE_ADMIN,
-    ]
-
-    lookup_field = "public_id"
-    lookup_url_kwarg = "public_id"
-    pagination_class = StandardResultsSetPagination
-
-    public_id_filter_fields = {
-        "variant_type_public_id": (
-            "variant_type__public_id"
-        ),
-        "product_public_id": (
-            "variant_type__product__public_id"
-        ),
-        "status_public_id": (
-            "status__public_id"
-        ),
-    }
-
-    search_fields = ["label"]
-
-
-@extend_schema_view(
-    list=extend_schema(tags=["Employees"]),
-    retrieve=extend_schema(tags=["Employees"]),
     create=extend_schema(
         tags=["Employees"],
         description="Registra un empleado. Este endpoint no crea automáticamente acceso al sistema.",
@@ -2503,11 +2295,16 @@ class EmployeeViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     read_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
         BusinessMembership.ROLE_ADMIN,
+        BusinessMembership.ROLE_CASHIER,
+        BusinessMembership.ROLE_SELLER,
     ]
 
-    create_allowed_roles = read_allowed_roles
-    update_allowed_roles = read_allowed_roles
-    destroy_allowed_roles = read_allowed_roles
+    create_allowed_roles = [
+        BusinessMembership.ROLE_OWNER,
+        BusinessMembership.ROLE_ADMIN,
+    ]
+    update_allowed_roles = create_allowed_roles
+    destroy_allowed_roles = create_allowed_roles
 
     public_id_filter_fields = {
         "status_public_id": (
@@ -2520,6 +2317,80 @@ class EmployeeViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     ordering = ["-created_at"]
 
     pagination_class = StandardResultsSetPagination
+
+    def _request_membership_role(self):
+        user = self.request.user
+
+        if self._is_platform_admin(user):
+            return BusinessMembership.ROLE_OWNER
+
+        business_id = None
+
+        if self.action == "list":
+            business_public_id = self.request.query_params.get(
+                "business_public_id"
+            )
+            try:
+                business_public_id = UUID(str(business_public_id))
+            except (TypeError, ValueError):
+                return None
+
+            business_id = (
+                Business.objects
+                .filter(public_id=business_public_id)
+                .values_list("pk", flat=True)
+                .first()
+            )
+
+        elif self.action == "retrieve":
+            employee_public_id = self.kwargs.get("public_id")
+            try:
+                employee_public_id = UUID(str(employee_public_id))
+            except (TypeError, ValueError):
+                return None
+
+            business_id = (
+                Employee.objects
+                .filter(public_id=employee_public_id)
+                .values_list("business_id", flat=True)
+                .first()
+            )
+
+        if business_id is None:
+            return None
+
+        return (
+            BusinessMembership.objects
+            .filter(
+                user=user,
+                business_id=business_id,
+                is_active=True,
+            )
+            .values_list("role", flat=True)
+            .first()
+        )
+
+    def get_serializer_class(self):
+        if self.action in {"list", "retrieve"}:
+            role = self._request_membership_role()
+            if role in {
+                BusinessMembership.ROLE_CASHIER,
+                BusinessMembership.ROLE_SELLER,
+            }:
+                return EmployeeSelectionSerializer
+
+        return EmployeeSerializer
+
+    def get_search_fields(self):
+        role = self._request_membership_role()
+
+        if role in {
+            BusinessMembership.ROLE_CASHIER,
+            BusinessMembership.ROLE_SELLER,
+        }:
+            return ["full_name", "position"]
+
+        return self.search_fields
 
 
 @extend_schema_view(
@@ -2684,7 +2555,7 @@ class PaymentMethodViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 class StockMovementViewSet(BusinessScopedViewSet):
     queryset = (
         StockMovement.objects
-        .select_related("product", "product__business", "variant", "variant__variant_type", "transaction")
+        .select_related("product", "product__business", "transaction")
         .all()
     )
     serializer_class = StockMovementSerializer
@@ -2708,7 +2579,7 @@ class StockMovementViewSet(BusinessScopedViewSet):
     ]
 
     filterset_class = StockMovementFilter
-    search_fields = ["product__title", "variant__label", "variant__variant_type__name", "transaction__public_id"]
+    search_fields = ["product__title", "transaction__public_id"]
     ordering_fields = ["created_at", "id", "product__title"]
     ordering = ["-created_at"]
 
@@ -2765,7 +2636,7 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
             "created_by",
             "updated_by",
         )
-        .prefetch_related("details", "details__product", "details__variant")
+        .prefetch_related("details", "details__product")
         .all()
     )
     serializer_class = TransactionSerializer
@@ -2882,73 +2753,26 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         sign = self._sign_for_tx(tx.type)
 
         if sign is not None:
-            rows = []
-
-            for detail in tx.details.select_related(
-                "product",
-                "variant",
-            ):
+            for detail in tx.details.select_related("product"):
                 product = detail.product
-                variant = detail.variant
                 quantity = detail.quantity
 
-                if variant is not None:
-                    stock_target = (
-                        ProductVariant.objects
-                        .select_for_update()
-                        .get(pk=variant.pk)
-                    )
-                else:
-                    stock_target = (
-                        Product.objects
-                        .select_for_update()
-                        .get(pk=product.pk)
-                    )
-
-                new_stock = stock_target.stock + (
-                    sign * quantity
+                record_stock_movement(
+                    product=product,
+                    transaction=tx,
+                    transaction_detail=detail,
+                    created_by=self.request.user,
+                    movement_type=(
+                        "sale"
+                        if sign == -1
+                        else "entry"
+                    ),
+                    quantity=sign * quantity,
+                    note=(
+                        f"Auto base from "
+                        f"{tx.type} {tx.public_id}"
+                    ),
                 )
-
-                if new_stock < 0:
-                    resource = (
-                        variant.label
-                        if variant is not None
-                        else product.title
-                    )
-
-                    raise ValidationError({
-                        "details": (
-                            f"Stock insuficiente en {resource}."
-                        )
-                    })
-
-                stock_target.stock = new_stock
-                stock_target.save(
-                    update_fields=["stock"]
-                )
-
-                rows.append(
-                    StockMovement(
-                        product=product,
-                        variant=variant,
-                        transaction=tx,
-                        transaction_detail=detail,
-                        created_by=self.request.user,
-                        type=(
-                            "sale"
-                            if sign == -1
-                            else "entry"
-                        ),
-                        quantity=sign * quantity,
-                        note=(
-                            f"Auto base from "
-                            f"{tx.type} {tx.public_id}"
-                        ),
-                    )
-                )
-
-            if rows:
-                StockMovement.objects.bulk_create(rows)
 
         log_action(
             self.request.user,
@@ -3017,63 +2841,23 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 
         # neutraliza inventario y stock
         totals = defaultdict(int)
-        for pid, vid, qty in tx.stock_movements.all().values_list("product_id", "variant_id", "quantity"):
-            totals[(pid, vid)] += qty
+        for pid, qty in tx.stock_movements.all().values_list("product_id", "quantity"):
+            totals[pid] += qty
 
-        to_movs = []
-        for (pid, vid), total_qty in totals.items():
+        for pid, total_qty in totals.items():
             if total_qty:
-                # revertir existencias
-                if vid:
-                    variant = (
-                        ProductVariant.objects
-                        .select_for_update()
-                        .get(pk=vid)
-                    )
-
-                    new_stock = variant.stock - total_qty
-
-                    if new_stock < 0:
-                        raise ValidationError({
-                            "details": (
-                                "No se puede eliminar la transacción porque "
-                                "dejaría stock negativo en una variante."
-                            )
-                        })
-
-                    variant.stock = new_stock
-                    variant.save(update_fields=["stock"])
-                else:
-                    product = (
-                        Product.objects
-                        .select_for_update()
-                        .get(pk=pid)
-                    )
-
-                    new_stock = product.stock - total_qty
-
-                    if new_stock < 0:
-                        raise ValidationError({
-                            "details": (
-                                "No se puede eliminar la transacción porque "
-                                "dejaría stock negativo en un producto."
-                            )
-                        })
-
-                    product.stock = new_stock
-                    product.save(update_fields=["stock"])
-
-                to_movs.append(StockMovement(
-                    product_id=pid,
-                    variant_id=vid,
+                record_stock_movement(
+                    product=Product(pk=pid),
                     transaction=tx,
                     created_by=self.request.user,
-                    type="adjustment",
+                    movement_type="adjustment",
                     quantity=-total_qty,
                     note=f"Auto neutralize {tx.public_id}",
-                ))
-        if to_movs:
-            StockMovement.objects.bulk_create(to_movs)
+                    insufficient_stock_message=(
+                        "No se puede eliminar la transacción porque "
+                        "dejaría stock negativo en un producto."
+                    ),
+                )
     
 @extend_schema_view(
     list=extend_schema(tags=["Debts"], summary="Listar deudas"),
@@ -5810,8 +5594,7 @@ class InventorySummaryView(
         description=(
             "Calcula existencias iniciales, "
             "entradas, ventas, ajustes y "
-            "existencias finales por producto "
-            "o variante dentro de un período."
+            "existencias finales por producto dentro de un período."
         ),
         parameters=[
             InventorySummaryQuerySerializer,
@@ -5860,17 +5643,9 @@ class InventorySummaryView(
         )
 
         product = None
-        variant = None
-
         product_public_id = (
             validated_data.get(
                 "product_public_id"
-            )
-        )
-
-        variant_public_id = (
-            validated_data.get(
-                "variant_public_id"
             )
         )
 
@@ -5883,19 +5658,6 @@ class InventorySummaryView(
                 business=business,
             )
 
-        if variant_public_id is not None:
-            variant = get_object_or_404(
-                ProductVariant.objects
-                .select_related(
-                    "variant_type",
-                    "variant_type__product",
-                ),
-                public_id=(
-                    variant_public_id
-                ),
-                variant_type__product=product,
-            )
-
         summary = build_inventory_summary(
             business=business,
             date_from=validated_data[
@@ -5905,7 +5667,6 @@ class InventorySummaryView(
                 "date_to"
             ],
             product=product,
-            variant=variant,
         )
 
         return Response(
@@ -6017,6 +5778,7 @@ class CurrentUserView(APIView):
             BusinessMembership.objects
             .select_related(
                 "business",
+                "employee",
             )
             .filter(
                 user=user,
@@ -6044,6 +5806,11 @@ class CurrentUserView(APIView):
                         membership.business.business_name
                     ),
                     "role": membership.role,
+                    "employee_public_id": (
+                        membership.employee.public_id
+                        if membership.employee_id is not None
+                        else None
+                    ),
                 }
                 for membership in memberships
             ],

@@ -9,7 +9,6 @@ from core.models import (
     Debt,
     DebtPayment,
     Product,
-    ProductVariant,
     Transaction,
 )
 from core.services.customer_supplier_reports import (
@@ -222,24 +221,9 @@ def build_dashboard_overview(
         ),
     )
 
-    products_without_variants = (
+    inventory = (
         Product.objects
-        .filter(
-            business=business,
-        )
-        .annotate(
-            variants_count=Count(
-                "variant_types__variants",
-                distinct=True,
-            )
-        )
-        .filter(
-            variants_count=0,
-        )
-    )
-
-    simple_inventory = (
-        products_without_variants
+        .filter(business=business)
         .aggregate(
             current_units=Sum("stock"),
             low_stock_count=Count(
@@ -255,62 +239,16 @@ def build_dashboard_overview(
         )
     )
 
-    variants = (
-        ProductVariant.objects
-        .filter(
-            variant_type__product__business=(
-                business
-            ),
-        )
-    )
-
-    variant_inventory = (
-        variants.aggregate(
-            current_units=Sum("stock"),
-            low_stock_count=Count(
-                "id",
-                filter=Q(
-                    stock__lte=low_stock_threshold
-                ),
-            ),
-            out_of_stock_count=Count(
-                "id",
-                filter=Q(stock=0),
-            ),
-        )
-    )
-
     current_inventory_units = (
-        int(
-            simple_inventory[
-                "current_units"
-            ]
-            or 0
-        )
-        + int(
-            variant_inventory[
-                "current_units"
-            ]
-            or 0
-        )
+        int(inventory["current_units"] or 0)
     )
 
     low_stock_items_count = (
-        simple_inventory[
-            "low_stock_count"
-        ]
-        + variant_inventory[
-            "low_stock_count"
-        ]
+        inventory["low_stock_count"]
     )
 
     out_of_stock_items_count = (
-        simple_inventory[
-            "out_of_stock_count"
-        ]
-        + variant_inventory[
-            "out_of_stock_count"
-        ]
+        inventory["out_of_stock_count"]
     )
 
     sales_total = decimal_or_zero(

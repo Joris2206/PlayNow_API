@@ -6,11 +6,7 @@ from django.db.models import (
 )
 from django.db.models.functions import Coalesce
 
-from core.models import (
-    Product,
-    ProductVariant,
-    StockMovement,
-)
+from core.models import Product, StockMovement
 from core.services.customer_supplier_reports import (
     get_report_datetime_range,
 )
@@ -26,17 +22,13 @@ def build_inventory_summary(
     date_from: date,
     date_to: date,
     product=None,
-    variant=None,
 ) -> dict:
     """
     Construye el reporte histórico de inventario.
 
     Reglas:
 
-    - Los productos sin variantes usan Product.stock.
-    - Los productos con variantes se reportan por variante.
-    - No se agrega una fila adicional usando Product.stock cuando
-      el producto posee variantes.
+    - Cada fila representa un Product individual.
     - El stock histórico se reconstruye usando StockMovement.
     """
     start_datetime, end_datetime = (
@@ -53,9 +45,6 @@ def build_inventory_summary(
         )
         .select_related(
             "status",
-        )
-        .prefetch_related(
-            "variant_types__variants",
         )
         .order_by(
             "title",
@@ -81,11 +70,6 @@ def build_inventory_summary(
             product=product,
         )
 
-    if variant is not None:
-        movements = movements.filter(
-            variant=variant,
-        )
-
     period_movements = movements.filter(
         created_at__gte=start_datetime,
         created_at__lt=end_datetime,
@@ -99,7 +83,6 @@ def build_inventory_summary(
         period_movements
         .values(
             "product_id",
-            "variant_id",
         )
         .annotate(
             movements_count=Count("id"),
@@ -153,7 +136,6 @@ def build_inventory_summary(
         movements_after_period
         .values(
             "product_id",
-            "variant_id",
         )
         .annotate(
             net_after_period=Coalesce(
@@ -166,7 +148,6 @@ def build_inventory_summary(
     period_map = {
         (
             row["product_id"],
-            row["variant_id"],
         ): row
         for row in period_grouped
     }
@@ -174,7 +155,6 @@ def build_inventory_summary(
     after_map = {
         (
             row["product_id"],
-            row["variant_id"],
         ): integer_or_zero(
             row["net_after_period"]
         )
@@ -196,7 +176,6 @@ def build_inventory_summary(
     def append_result(
         *,
         current_product,
-        current_variant,
         current_stock,
     ):
         nonlocal total_opening_stock
@@ -209,14 +188,7 @@ def build_inventory_summary(
         nonlocal total_current_stock
         nonlocal total_movements_count
 
-        key = (
-            current_product.pk,
-            (
-                current_variant.pk
-                if current_variant is not None
-                else None
-            ),
-        )
+        key = (current_product.pk,)
 
         period_row = period_map.get(
             key,
@@ -289,23 +261,6 @@ def build_inventory_summary(
                     current_product.title
                 ),
             },
-            "variant": (
-                {
-                    "public_id": str(
-                        current_variant.public_id
-                    ),
-                    "variant_type": (
-                        current_variant
-                        .variant_type
-                        .name
-                    ),
-                    "label": (
-                        current_variant.label
-                    ),
-                }
-                if current_variant is not None
-                else None
-            ),
             "opening_stock": opening_stock,
             "entries": entries,
             "sales": sales,
@@ -342,50 +297,8 @@ def build_inventory_summary(
         )
 
     for current_product in product_queryset:
-        variants = []
-
-        for variant_type in (
-            current_product
-            .variant_types
-            .all()
-        ):
-            variants.extend(
-                list(
-                    variant_type
-                    .variants
-                    .all()
-                )
-            )
-
-        if variant is not None:
-            variants = [
-                item
-                for item in variants
-                if item.pk == variant.pk
-            ]
-
-        if variants:
-            for current_variant in variants:
-                append_result(
-                    current_product=(
-                        current_product
-                    ),
-                    current_variant=(
-                        current_variant
-                    ),
-                    current_stock=(
-                        current_variant.stock
-                    ),
-                )
-
-            continue
-
-        if variant is not None:
-            continue
-
         append_result(
             current_product=current_product,
-            current_variant=None,
             current_stock=(
                 current_product.stock
             ),

@@ -8,8 +8,6 @@ from core.tests.factories import (
     create_category,
     create_product,
     create_status,
-    create_variant,
-    create_variant_type,
 )
 from core.tests.helpers import (
     get_public_ids,
@@ -267,19 +265,6 @@ class PublicCatalogTests(BusinessIsolationTestCase):
             title="Producto público ajeno",
         )
 
-        cls.variant_type = create_variant_type(
-            product=cls.public_product,
-            status=cls.active_status,
-        )
-        cls.variant = create_variant(
-            variant_type=cls.variant_type,
-            status=cls.active_status,
-        )
-        cls.inactive_variant = create_variant(
-            variant_type=cls.variant_type,
-            status=cls.inactive_status,
-        )
-
     def setUp(self):
         self.client.force_authenticate(user=None)
 
@@ -358,8 +343,6 @@ class PublicCatalogTests(BusinessIsolationTestCase):
         collection_endpoints = (
             "/api/public/products/",
             "/api/public/categories/",
-            "/api/public/variant-types/",
-            "/api/public/variants/",
         )
 
         for endpoint in collection_endpoints:
@@ -391,7 +374,7 @@ class PublicCatalogTests(BusinessIsolationTestCase):
                     status.HTTP_405_METHOD_NOT_ALLOWED,
                 )
 
-    def test_public_categories_and_variants_apply_parent_policy(self):
+    def test_public_categories_are_scoped_to_business(self):
         category_response = self.client.get(
             "/api/public/categories/",
             self.business_params(),
@@ -401,43 +384,18 @@ class PublicCatalogTests(BusinessIsolationTestCase):
             {str(self.category.public_id)},
         )
 
-        type_response = self.client.get(
+    def test_variant_endpoints_are_removed(self):
+        for endpoint in (
+            "/api/variant-types/",
+            "/api/variants/",
             "/api/public/variant-types/",
-            self.business_params(),
-        )
-        self.assertEqual(
-            get_public_ids(type_response),
-            {str(self.variant_type.public_id)},
-        )
-
-        variant_response = self.client.get(
             "/api/public/variants/",
-            self.business_params(),
-        )
-        self.assertEqual(
-            get_public_ids(variant_response),
-            {str(self.variant.public_id)},
-        )
-
-        self.public_product.is_visible = False
-        self.public_product.save(update_fields=["is_visible"])
-
-        self.assertFalse(
-            get_response_results(
-                self.client.get(
-                    "/api/public/variant-types/",
-                    self.business_params(),
+        ):
+            with self.subTest(endpoint=endpoint):
+                self.assertEqual(
+                    self.client.get(endpoint).status_code,
+                    status.HTTP_404_NOT_FOUND,
                 )
-            )
-        )
-        self.assertFalse(
-            get_response_results(
-                self.client.get(
-                    "/api/public/variants/",
-                    self.business_params(),
-                )
-            )
-        )
 
 
 class StatusAndPublicOpenApiTests(BusinessIsolationTestCase):
@@ -451,8 +409,6 @@ class StatusAndPublicOpenApiTests(BusinessIsolationTestCase):
             "/api/businesses/",
             "/api/categories/",
             "/api/products/",
-            "/api/variant-types/",
-            "/api/variants/",
             "/api/employees/",
             "/api/customers/",
             "/api/suppliers/",
@@ -477,8 +433,6 @@ class StatusAndPublicOpenApiTests(BusinessIsolationTestCase):
         for resource in (
             "products",
             "categories",
-            "variant-types",
-            "variants",
         ):
             collection = schema["paths"][
                 f"/api/public/{resource}/"
@@ -488,6 +442,14 @@ class StatusAndPublicOpenApiTests(BusinessIsolationTestCase):
             ]
             self.assertEqual(set(collection), {"get"})
             self.assertEqual(set(detail), {"get"})
+
+        for path in (
+            "/api/variant-types/",
+            "/api/variants/",
+            "/api/public/variant-types/",
+            "/api/public/variants/",
+        ):
+            self.assertNotIn(path, schema["paths"])
 
         public_product_fields = schema["components"]["schemas"][
             "PublicProduct"

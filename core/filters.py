@@ -15,6 +15,21 @@ class ConfiguredSearchFilter(SearchFilter):
     default schema parameter still suggests that the query parameter works.
     """
 
+    def get_search_fields(self, view, request):
+        dynamic_fields = getattr(
+            view,
+            "get_search_fields",
+            None,
+        )
+
+        if callable(dynamic_fields):
+            return dynamic_fields()
+
+        return super().get_search_fields(
+            view,
+            request,
+        )
+
     def get_schema_operation_parameters(self, view):
         if not getattr(view, "search_fields", None):
             return []
@@ -104,10 +119,6 @@ class StockMovementFilter(
 
     product_public_id = filters.UUIDFilter(
         field_name="product__public_id",
-    )
-
-    variant_public_id = filters.UUIDFilter(
-        field_name="variant__public_id",
     )
 
     transaction_public_id = (

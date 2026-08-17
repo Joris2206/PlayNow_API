@@ -26,8 +26,6 @@ from core.tests.factories import (
     create_product,
     create_role_user,
     create_transaction,
-    create_variant,
-    create_variant_type,
 )
 
 
@@ -411,32 +409,17 @@ class DashboardOverviewTests(
             stock=4,
         )
 
-        product_with_variants = (
-            create_product(
-                business=self.business_a,
-                status=self.active_status,
-                title="Producto variante",
-                stock=999,
-            )
-        )
-
-        variant_type = create_variant_type(
-            product=product_with_variants,
+        create_product(
+            business=self.business_a,
             status=self.active_status,
-            name="Talla",
-        )
-
-        create_variant(
-            variant_type=variant_type,
-            status=self.active_status,
-            label="S",
+            title="Camiseta negra / S",
             stock=3,
         )
 
-        create_variant(
-            variant_type=variant_type,
+        create_product(
+            business=self.business_a,
             status=self.active_status,
-            label="L",
+            title="Camiseta negra / L",
             stock=8,
         )
 
