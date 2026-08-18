@@ -3,6 +3,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction as db_tx
 from django.db.models import Sum, Q
 from django.utils import timezone
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from core.utils import calculate_employee_advance_summary
@@ -256,10 +257,16 @@ class PaymentMethodSerializer(
             "public_id",
             "business_public_id",
             "name",
+            "method_type",
             "status_public_id",
             "status_name",
         )
         read_only_fields = ("public_id",)
+        extra_kwargs = {
+            "method_type": {
+                "required": True,
+            },
+        }
 
 class BusinessSerializer(
     DefaultActiveStatusMixin,
@@ -1521,20 +1528,51 @@ class TransactionSerializer(
 
 # ---------- Pagos de Deuda ----------
 class DebtSerializer(serializers.ModelSerializer):
+    business_public_id = public_id_read_only(
+        source="transaction.business",
+    )
     transaction_public_id = public_id_field(
         Transaction,
         source="transaction",
     )
+    direction = serializers.SerializerMethodField()
+    outstanding_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        read_only=True,
+    )
     customer_name = related_name_field("transaction.customer.full_name", allow_null=True)
     supplier_name = related_name_field("transaction.supplier.name", allow_null=True)
     transaction_type = related_name_field("transaction.type")
+
+    @extend_schema_field({
+        "type": "string",
+        "enum": [
+            "receivable",
+            "payable",
+        ],
+        "nullable": True,
+    })
+    def get_direction(self, obj):
+        directions = {
+            "sale": "receivable",
+            "purchase": "payable",
+        }
+
+        return directions.get(
+            obj.transaction.type
+        )
+
     class Meta:
         model = Debt
         fields = (
             "public_id",
+            "business_public_id",
             "transaction_public_id",
+            "direction",
             "total_amount",
             "paid_amount",
+            "outstanding_amount",
             "interest_rate",
             "term_months",
             "customer_name",
@@ -1553,6 +1591,9 @@ class DebtSerializer(serializers.ModelSerializer):
         )
 
 class DebtPaymentSerializer(serializers.ModelSerializer):
+    business_public_id = public_id_read_only(
+        source="debt.transaction.business",
+    )
     debt_public_id = public_id_field(
         Debt,
         source="debt",
@@ -1572,7 +1613,7 @@ class DebtPaymentSerializer(serializers.ModelSerializer):
     )
     class Meta:
         model = DebtPayment
-        fields = ("public_id", "debt_public_id", "amount", "payment_date", "payment_method_public_id", "payment_method_name", "customer_name", "supplier_name", "transaction_public_id", "created_at", "updated_at")
+        fields = ("public_id", "business_public_id", "debt_public_id", "amount", "payment_date", "payment_method_public_id", "payment_method_name", "customer_name", "supplier_name", "transaction_public_id", "created_at", "updated_at")
         read_only_fields = ("public_id", "created_at", "updated_at")
 
     def validate(self, attrs):

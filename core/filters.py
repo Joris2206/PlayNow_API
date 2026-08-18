@@ -1,6 +1,11 @@
 # core/filters.py
 from django_filters import rest_framework as filters
-from .models import StockMovement, Transaction
+from .models import (
+    Debt,
+    DebtPayment,
+    StockMovement,
+    Transaction,
+)
 from django_filters.rest_framework import (
     DjangoFilterBackend,
 )
@@ -92,6 +97,57 @@ class TransactionFilter(
 
     class Meta:
         model = Transaction
+        fields = []
+
+
+class DebtFilter(
+    filters.FilterSet
+):
+    business_public_id = filters.UUIDFilter(
+        field_name="transaction__business__public_id",
+    )
+
+    transaction_type = filters.ChoiceFilter(
+        field_name="transaction__type",
+        choices=Transaction.TRANSACTION_TYPES,
+    )
+
+    is_settled = filters.BooleanFilter(
+        field_name="is_settled",
+    )
+
+    customer_public_id = filters.UUIDFilter(
+        field_name="transaction__customer__public_id",
+    )
+
+    supplier_public_id = filters.UUIDFilter(
+        field_name="transaction__supplier__public_id",
+    )
+
+    transaction_public_id = filters.UUIDFilter(
+        field_name="transaction__public_id",
+    )
+
+    class Meta:
+        model = Debt
+        fields = []
+
+
+class DebtPaymentFilter(
+    filters.FilterSet
+):
+    business_public_id = filters.UUIDFilter(
+        field_name=(
+            "debt__transaction__business__public_id"
+        ),
+    )
+
+    debt_public_id = filters.UUIDFilter(
+        field_name="debt__public_id",
+    )
+
+    class Meta:
+        model = DebtPayment
         fields = []
 
 class StockMovementFilter(

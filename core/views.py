@@ -24,14 +24,28 @@ from core.services.inventory_report import build_inventory_summary
 from core.services.inventory import record_stock_movement
 from core.services.monthly_summary import build_monthly_summary
 from core.services.payment_debt_reports import build_debts_summary, build_payments_summary
-from .filters import StockMovementFilter, TransactionFilter
+from .filters import (
+    DebtFilter,
+    DebtPaymentFilter,
+    StockMovementFilter,
+    TransactionFilter,
+)
 from .pagination import StandardResultsSetPagination
 from .mixins import RequireBusinessPublicIdListMixin, SoftDeleteByStatusMixin
 from django.db import (
     IntegrityError,
     transaction as db_tx,
 )
-from django.db.models import (Avg, Count, Q, Sum, Max)
+from django.db.models import (
+    Avg,
+    Count,
+    DecimalField,
+    ExpressionWrapper,
+    F,
+    Max,
+    Q,
+    Sum,
+)
 from collections import defaultdict
 from core.utils import calculate_employee_advance_summary, log_action
 from rest_framework.throttling import ScopedRateThrottle
@@ -226,6 +240,7 @@ PAYMENT_METHOD_CREATE_EXAMPLE = OpenApiExample(
     value={
         "business_public_id": BUSINESS_PUBLIC_ID,
         "name": "Transferencia bancaria",
+        "method_type": "transfer",
     },
     request_only=True,
 )
@@ -2514,7 +2529,10 @@ class SupplierViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     destroy=extend_schema(tags=["Payment Methods"]),
 )
 class PaymentMethodViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
-    queryset = PaymentMethod.objects.select_related("business").all()
+    queryset = PaymentMethod.objects.select_related(
+        "business",
+        "status",
+    ).all()
     serializer_class = PaymentMethodSerializer
 
     business_lookup = "business"
@@ -2524,6 +2542,7 @@ class PaymentMethodViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         BusinessMembership.ROLE_ADMIN,
         BusinessMembership.ROLE_CASHIER,
         BusinessMembership.ROLE_SELLER,
+        BusinessMembership.ROLE_INVENTORY,
         BusinessMembership.ROLE_VIEWER,
     ]
 
@@ -2546,6 +2565,63 @@ class PaymentMethodViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     }
 
     search_fields = ["name"]
+
+    administrative_read_roles = [
+        BusinessMembership.ROLE_OWNER,
+        BusinessMembership.ROLE_ADMIN,
+        BusinessMembership.ROLE_VIEWER,
+    ]
+
+    operational_read_roles = [
+        BusinessMembership.ROLE_CASHIER,
+        BusinessMembership.ROLE_SELLER,
+        BusinessMembership.ROLE_INVENTORY,
+    ]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+
+        if user.is_superuser:
+            return queryset
+
+        administrative_businesses = (
+            BusinessMembership.objects
+            .filter(
+                user=user,
+                is_active=True,
+                role__in=(
+                    self.administrative_read_roles
+                ),
+            )
+            .values("business_id")
+        )
+
+        operational_businesses = (
+            BusinessMembership.objects
+            .filter(
+                user=user,
+                is_active=True,
+                role__in=(
+                    self.operational_read_roles
+                ),
+            )
+            .values("business_id")
+        )
+
+        return queryset.filter(
+            Q(
+                business_id__in=(
+                    administrative_businesses
+                ),
+            )
+            | Q(
+                business_id__in=(
+                    operational_businesses
+                ),
+                status__name__iexact="Activo",
+            )
+        ).distinct()
 
 
 @extend_schema_view(
@@ -2870,13 +2946,25 @@ class DebtViewSet(BusinessScopedViewSet):
             "transaction",
             "transaction__business",
             "transaction__customer",
+            "transaction__supplier",
             "transaction__employee",
+        )
+        .annotate(
+            outstanding_amount=ExpressionWrapper(
+                F("total_amount")
+                - F("paid_amount"),
+                output_field=DecimalField(
+                    max_digits=12,
+                    decimal_places=2,
+                ),
+            ),
         )
         .order_by("-created_at")
     )
     
     serializer_class = DebtSerializer
     business_lookup = "transaction__business"
+    filterset_class = DebtFilter
 
     read_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
@@ -2920,10 +3008,19 @@ class DebtViewSet(BusinessScopedViewSet):
     ),
 )
 class DebtPaymentViewSet(BusinessScopedViewSet):
-    queryset = DebtPayment.objects.select_related("debt", "debt__transaction", "debt__transaction__business", "payment_method", "transaction").all()
+    queryset = DebtPayment.objects.select_related(
+        "debt",
+        "debt__transaction",
+        "debt__transaction__business",
+        "debt__transaction__customer",
+        "debt__transaction__supplier",
+        "payment_method",
+        "transaction",
+    ).all()
     serializer_class = DebtPaymentSerializer
 
     business_lookup = "debt__transaction__business"
+    filterset_class = DebtPaymentFilter
 
     read_allowed_roles = [
         BusinessMembership.ROLE_OWNER,

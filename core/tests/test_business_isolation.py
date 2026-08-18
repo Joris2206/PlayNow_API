@@ -69,6 +69,9 @@ class DirectBusinessIsolationTests(BusinessIsolationTestCase):
                         self.business_b.public_id
                     ),
                     "name": "Método infiltrado",
+                    "method_type": (
+                        PaymentMethod.METHOD_TYPES[0][0]
+                    ),
                 },
                 lambda: PaymentMethod.objects.filter(
                     name="Método infiltrado",
