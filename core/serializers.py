@@ -6,6 +6,10 @@ from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from core.services.debt_payments import (
+    TERMINAL_TRANSACTION_STATUS_NAMES,
+    register_debt_payment,
+)
 from core.utils import calculate_employee_advance_summary
 from .models import (
     BusinessMembership, MonthlyClosure, User, Business, EntityStatus,
@@ -59,6 +63,39 @@ def public_id_read_only(
         kwargs["source"] = source
 
     return serializers.SlugRelatedField(**kwargs)
+
+
+class SecurePublicIdRelatedField(
+    serializers.SlugRelatedField
+):
+    default_error_messages = {
+        **serializers.SlugRelatedField.default_error_messages,
+        "does_not_exist": (
+            "La relación indicada no es válida."
+        ),
+    }
+
+
+def secure_public_id_field(
+    model,
+    *,
+    source=None,
+    required=True,
+    allow_null=False,
+):
+    kwargs = {
+        "slug_field": "public_id",
+        "queryset": model.objects.all(),
+        "required": required,
+        "allow_null": allow_null,
+    }
+
+    if source is not None:
+        kwargs["source"] = source
+
+    return SecurePublicIdRelatedField(
+        **kwargs,
+    )
 
 def related_name_field(
     source,
@@ -779,13 +816,9 @@ class TransactionDetailSerializer(
 class TransactionSerializer(
     serializers.ModelSerializer
 ):
-    TERMINAL_STATUS_NAMES = {
-        "anulado",
-        "cancelado",
-        "eliminado",
-        "void",
-        "deleted",
-    }
+    TERMINAL_STATUS_NAMES = (
+        TERMINAL_TRANSACTION_STATUS_NAMES
+    )
 
     business_public_id = public_id_field(
         Business,
@@ -1594,18 +1627,18 @@ class DebtPaymentSerializer(serializers.ModelSerializer):
     business_public_id = public_id_read_only(
         source="debt.transaction.business",
     )
-    debt_public_id = public_id_field(
+    debt_public_id = secure_public_id_field(
         Debt,
         source="debt",
     )
-    payment_method_public_id = public_id_field(
+    payment_method_public_id = secure_public_id_field(
         PaymentMethod,
         source="payment_method",
     )
     payment_method_name = related_name_field("payment_method.name")
     customer_name = related_name_field("debt.transaction.customer.full_name", allow_null=True)
     supplier_name = related_name_field("debt.transaction.supplier.name", allow_null=True)
-    transaction_public_id = public_id_field(
+    transaction_public_id = secure_public_id_field(
         Transaction,
         source="transaction",
         required=False,
@@ -1616,93 +1649,88 @@ class DebtPaymentSerializer(serializers.ModelSerializer):
         fields = ("public_id", "business_public_id", "debt_public_id", "amount", "payment_date", "payment_method_public_id", "payment_method_name", "customer_name", "supplier_name", "transaction_public_id", "created_at", "updated_at")
         read_only_fields = ("public_id", "created_at", "updated_at")
 
-    def validate(self, attrs):
-        debt = attrs.get(
-            "debt",
-            getattr(self.instance, "debt", None),
-        )
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-        amount = attrs.get(
-            "amount",
-            getattr(self.instance, "amount", None),
-        )
-
-        payment_method = attrs.get(
-            "payment_method",
-            getattr(self.instance, "payment_method", None),
-        )
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
 
         if (
-            debt is not None
-            and payment_method is not None
-            and payment_method.business_id
-            != debt.transaction.business_id
+            user is not None
+            and user.is_authenticated
+            and user.is_superuser
         ):
-            raise serializers.ValidationError({
-                "payment_method_public_id": (
-                    "El método de pago no pertenece "
-                    "al negocio de la deuda."
-                )
-            })
+            return
 
-        if debt and amount:
-            previous_amount = (
-                self.instance.amount
-                if self.instance
-                else 0
+        if user is None or not user.is_authenticated:
+            debt_queryset = Debt.objects.none()
+            payment_method_queryset = (
+                PaymentMethod.objects.none()
+            )
+            transaction_queryset = (
+                Transaction.objects.none()
+            )
+        else:
+            business_ids = (
+                BusinessMembership.objects
+                .filter(
+                    user=user,
+                    is_active=True,
+                )
+                .values("business_id")
+            )
+            debt_queryset = Debt.objects.filter(
+                transaction__business_id__in=(
+                    business_ids
+                ),
+            )
+            payment_method_queryset = (
+                PaymentMethod.objects.filter(
+                    business_id__in=business_ids,
+                )
+            )
+            transaction_queryset = (
+                Transaction.objects.filter(
+                    business_id__in=business_ids,
+                )
             )
 
-            remaining_amount = (
+        self.fields["debt_public_id"].queryset = (
+            debt_queryset
+        )
+        self.fields[
+            "payment_method_public_id"
+        ].queryset = payment_method_queryset
+        self.fields[
+            "transaction_public_id"
+        ].queryset = transaction_queryset
+
+    def create(self, validated_data):
+        debt = validated_data["debt"]
+        payment_method = validated_data[
+            "payment_method"
+        ]
+        submitted_transaction = (
+            validated_data.get("transaction")
+        )
+
+        return register_debt_payment(
+            debt_id=debt.pk,
+            amount=validated_data["amount"],
+            payment_date=validated_data[
+                "payment_date"
+            ],
+            payment_method_id=payment_method.pk,
+            submitted_transaction_id=(
+                submitted_transaction.pk
+                if submitted_transaction is not None
+                else None
+            ),
+            observed_remaining_amount=(
                 debt.total_amount
                 - debt.paid_amount
-                + previous_amount
-            )
-
-            if amount > remaining_amount:
-                raise serializers.ValidationError({
-                    "amount": (
-                        "El pago no puede superar el saldo pendiente."
-                    )
-                })
-
-        related_transaction = attrs.get("transaction")
-
-        if (
-            debt
-            and related_transaction
-            and related_transaction.business_id
-            != debt.transaction.business_id
-        ):
-            raise serializers.ValidationError({
-                "transaction_public_id": (
-                    "La transacción del pago no pertenece "
-                    "al mismo negocio de la deuda."
-                )
-            })
-
-        return attrs
-
-    @db_tx.atomic
-    def create(self, validated_data):
-        payment = super().create(validated_data)
-
-        debt = Debt.objects.select_for_update().get(
-            pk=payment.debt_id
+            ),
         )
-
-        debt.paid_amount += payment.amount
-        debt.is_settled = (
-            debt.paid_amount >= debt.total_amount
-        )
-
-        debt.save(
-            update_fields=[
-                "paid_amount",
-                "is_settled",
-            ]
-        )
-
-        return payment
 
 # ---------- Notificaciones / Recordatorios ----------
 class NotificationSerializer(serializers.ModelSerializer):
