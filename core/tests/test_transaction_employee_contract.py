@@ -435,7 +435,29 @@ class TransactionEmployeeAuthorizationTests(BusinessIsolationTestCase):
             "/api/transactions/", self._sale_payload(), format="json"
         )
 
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.json(),
+            {
+                "business_public_id": [
+                    "La relación indicada no es válida."
+                ],
+                "customer_public_id": [
+                    "La relación indicada no es válida."
+                ],
+                "employee_public_id": [
+                    "La relación indicada no es válida."
+                ],
+                "payment_method_public_id": [
+                    "La relación indicada no es válida."
+                ],
+                "details": [{
+                    "product_public_id": [
+                        "La relación indicada no es válida."
+                    ],
+                }],
+            },
+        )
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, initial_stock)
         self.assertFalse(Transaction.objects.exists())

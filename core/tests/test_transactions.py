@@ -155,6 +155,7 @@ class TransactionTests(BusinessIsolationTestCase):
     def test_pending_sale_creates_debt(self):
         payload = self.sale_payload()
         payload["payment_status"] = "pending"
+        payload.pop("payment_method_public_id")
         response = self.client.post("/api/transactions/", payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         tx = Transaction.objects.get(public_id=response.data["public_id"])

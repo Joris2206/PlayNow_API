@@ -35,6 +35,46 @@ def _raise_amount_error(message):
     })
 
 
+def get_locked_active_payment_method(
+    *,
+    payment_method_id,
+    business_id,
+):
+    """Lock and authoritatively validate a payment method.
+
+    Debt payments call this after locking Debt and Transaction, preserving
+    the global Debt -> Transaction -> PaymentMethod order. A new Transaction
+    has no pre-existing financial rows to lock, so creation locks only the
+    PaymentMethod.
+    """
+    payment_method = (
+        PaymentMethod.objects
+        .select_for_update(of=("self",))
+        .select_related("business", "status")
+        .filter(
+            pk=payment_method_id,
+            business_id=business_id,
+        )
+        .first()
+    )
+
+    if payment_method is None:
+        raise ValidationError({
+            "payment_method_public_id": (
+                "El método de pago no es válido para este negocio."
+            ),
+        })
+
+    if payment_method.status.name.casefold() != "activo":
+        raise ValidationError({
+            "payment_method_public_id": (
+                "El método de pago debe estar Activo."
+            ),
+        })
+
+    return payment_method
+
+
 @db_tx.atomic
 def register_debt_payment(
     *,
@@ -85,33 +125,10 @@ def register_debt_payment(
             "El importe del pago debe ser mayor que cero."
         )
 
-    payment_method = (
-        PaymentMethod.objects
-        .select_for_update(of=("self",))
-        .select_related("business", "status")
-        .filter(
-            pk=payment_method_id,
-            business_id=transaction.business_id,
-        )
-        .first()
+    payment_method = get_locked_active_payment_method(
+        payment_method_id=payment_method_id,
+        business_id=transaction.business_id,
     )
-
-    if (
-        payment_method is None
-    ):
-        raise ValidationError({
-            "payment_method_public_id": (
-                "El método de pago no es válido "
-                "para esta deuda."
-            ),
-        })
-
-    if payment_method.status.name.casefold() != "activo":
-        raise ValidationError({
-            "payment_method_public_id": (
-                "El método de pago debe estar Activo."
-            ),
-        })
 
     if (
         submitted_transaction_id is not None

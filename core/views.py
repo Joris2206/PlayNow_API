@@ -271,6 +271,40 @@ TRANSACTION_SALE_EXAMPLE = OpenApiExample(
     request_only=True,
 )
 
+TRANSACTION_SALE_PENDING_EXAMPLE = OpenApiExample(
+    "Venta pendiente",
+    value={
+        "business_public_id": BUSINESS_PUBLIC_ID,
+        "customer_public_id": CUSTOMER_PUBLIC_ID,
+        "employee_public_id": EMPLOYEE_PUBLIC_ID,
+        "type": "sale",
+        "payment_status": "pending",
+        "details": [{
+            "product_public_id": PRODUCT_PUBLIC_ID,
+            "quantity": 2,
+        }],
+    },
+    request_only=True,
+)
+
+TRANSACTION_SALE_PARTIAL_EXAMPLE = OpenApiExample(
+    "Venta con pago inicial",
+    value={
+        "business_public_id": BUSINESS_PUBLIC_ID,
+        "customer_public_id": CUSTOMER_PUBLIC_ID,
+        "employee_public_id": EMPLOYEE_PUBLIC_ID,
+        "payment_method_public_id": PAYMENT_METHOD_PUBLIC_ID,
+        "type": "sale",
+        "payment_status": "partial",
+        "initial_paid_amount": "75.00",
+        "details": [{
+            "product_public_id": PRODUCT_PUBLIC_ID,
+            "quantity": 2,
+        }],
+    },
+    request_only=True,
+)
+
 TRANSACTION_PURCHASE_EXAMPLE = OpenApiExample(
     "Compra de inventario",
     value={
@@ -292,6 +326,38 @@ TRANSACTION_PURCHASE_EXAMPLE = OpenApiExample(
                 "unit_price": "560.00",
             }
         ],
+    },
+    request_only=True,
+)
+
+TRANSACTION_PURCHASE_PENDING_EXAMPLE = OpenApiExample(
+    "Compra pendiente",
+    value={
+        "business_public_id": BUSINESS_PUBLIC_ID,
+        "supplier_public_id": SUPPLIER_PUBLIC_ID,
+        "type": "purchase",
+        "payment_status": "pending",
+        "details": [{
+            "product_public_id": PRODUCT_PUBLIC_ID,
+            "quantity": 12,
+        }],
+    },
+    request_only=True,
+)
+
+TRANSACTION_PURCHASE_PARTIAL_EXAMPLE = OpenApiExample(
+    "Compra con pago inicial",
+    value={
+        "business_public_id": BUSINESS_PUBLIC_ID,
+        "supplier_public_id": SUPPLIER_PUBLIC_ID,
+        "payment_method_public_id": PAYMENT_METHOD_PUBLIC_ID,
+        "type": "purchase",
+        "payment_status": "partial",
+        "initial_paid_amount": "100.00",
+        "details": [{
+            "product_public_id": PRODUCT_PUBLIC_ID,
+            "quantity": 12,
+        }],
     },
     request_only=True,
 )
@@ -318,6 +384,8 @@ TRANSACTION_EXPENSE_EXAMPLE = OpenApiExample(
 TRANSACTION_UPDATE_EXAMPLE = OpenApiExample(
     "Actualizar datos permitidos",
     value={
+        "business_public_id": BUSINESS_PUBLIC_ID,
+        "type": "sale",
         "customer_public_id": CUSTOMER_PUBLIC_ID,
         "payment_method_public_id": PAYMENT_METHOD_PUBLIC_ID,
         "discount_percent": "5.00",
@@ -432,7 +500,8 @@ from .serializers import (
     BusinessSerializer, EntityStatusSerializer,
     ProductCategorySerializer, ProductSerializer,
     EmployeeSerializer, CustomerSerializer, SupplierSerializer, PaymentMethodSerializer,
-    TransactionSerializer, TransactionDetailSerializer, StockMovementSerializer,
+    TransactionSerializer, TransactionUpdateSchemaSerializer,
+    TransactionDetailSerializer, StockMovementSerializer,
     DebtSerializer, DebtPaymentSerializer, NotificationSerializer, ReminderSerializer,
     BudgetSerializer, GoalSerializer, GoalProgressSerializer, 
     CommissionSettlementCreateSerializer, CommissionSettlementSerializer, EmployeeCommissionPlanSerializer,
@@ -2671,18 +2740,29 @@ class StockMovementViewSet(BusinessScopedViewSet):
             "Crea una venta, compra o gasto. "
             "El usuario autenticado se registra automáticamente "
             "como creador de la transacción. En las ventas debe "
-            "indicarse el empleado al que pertenece la venta."
+            "indicarse el empleado al que pertenece la venta. "
+            "Un total positivo paid requiere método de pago; pending "
+            "no admite método; partial requiere método e "
+            "initial_paid_amount y registra el pago inicial de forma "
+            "atómica. Los gastos solo admiten paid. Un total cero solo "
+            "admite paid sin método ni pago inicial distinto de cero."
         ),
         examples=[
             TRANSACTION_SALE_EXAMPLE,
+            TRANSACTION_SALE_PENDING_EXAMPLE,
+            TRANSACTION_SALE_PARTIAL_EXAMPLE,
             TRANSACTION_PURCHASE_EXAMPLE,
+            TRANSACTION_PURCHASE_PENDING_EXAMPLE,
+            TRANSACTION_PURCHASE_PARTIAL_EXAMPLE,
             TRANSACTION_EXPENSE_EXAMPLE,
         ],
     ),
     update=extend_schema(
         tags=["Transactions"],
+        request=TransactionUpdateSchemaSerializer,
         summary="Actualizar una transacción",
         description=(
+            "PUT exige business_public_id y type con los valores actuales. "
             "No permite cambiar el negocio, el tipo, los detalles, "
             "el estado de pago ni el monto de un gasto."
         ),
@@ -2690,10 +2770,12 @@ class StockMovementViewSet(BusinessScopedViewSet):
     ),
     partial_update=extend_schema(
         tags=["Transactions"],
+        request=TransactionUpdateSchemaSerializer,
         summary="Actualizar parcialmente una transacción",
         description=(
             "Permite modificar únicamente los campos editables de "
-            "una transacción existente."
+            "una transacción existente. No exige business_public_id "
+            "ni type."
         ),
         examples=[TRANSACTION_UPDATE_EXAMPLE],
     ),

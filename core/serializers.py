@@ -3,11 +3,15 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction as db_tx
 from django.db.models import Sum, Q
 from django.utils import timezone
-from drf_spectacular.utils import extend_schema_field
+from drf_spectacular.utils import (
+    extend_schema_field,
+    extend_schema_serializer,
+)
 from rest_framework import serializers
 
 from core.services.debt_payments import (
     TERMINAL_TRANSACTION_STATUS_NAMES,
+    get_locked_active_payment_method,
     register_debt_payment,
 )
 from core.utils import calculate_employee_advance_summary
@@ -95,6 +99,33 @@ def secure_public_id_field(
 
     return SecurePublicIdRelatedField(
         **kwargs,
+    )
+
+
+def active_membership_business_ids(context):
+    request = context.get("request")
+    user = getattr(request, "user", None)
+
+    if (
+        user is not None
+        and user.is_authenticated
+        and user.is_superuser
+    ):
+        return None
+
+    if user is None or not user.is_authenticated:
+        return (
+            Business.objects.none()
+            .values_list("pk", flat=True)
+        )
+
+    return (
+        BusinessMembership.objects
+        .filter(
+            user=user,
+            is_active=True,
+        )
+        .values_list("business_id", flat=True)
     )
 
 def related_name_field(
@@ -773,7 +804,7 @@ class SupplierSerializer(
 class TransactionDetailSerializer(
     serializers.ModelSerializer
 ):
-    product_public_id = public_id_field(
+    product_public_id = secure_public_id_field(
         Product,
         source="product",
     )
@@ -820,29 +851,29 @@ class TransactionSerializer(
         TERMINAL_TRANSACTION_STATUS_NAMES
     )
 
-    business_public_id = public_id_field(
+    business_public_id = secure_public_id_field(
         Business,
         source="business",
     )
-    customer_public_id = public_id_field(
+    customer_public_id = secure_public_id_field(
         Customer,
         source="customer",
         required=False,
         allow_null=True,
     )
-    supplier_public_id = public_id_field(
+    supplier_public_id = secure_public_id_field(
         Supplier,
         source="supplier",
         required=False,
         allow_null=True,
     )
-    employee_public_id = public_id_field(
+    employee_public_id = secure_public_id_field(
         Employee,
         source="employee",
         required=False,
         allow_null=True
     )
-    payment_method_public_id = public_id_field(
+    payment_method_public_id = secure_public_id_field(
         PaymentMethod,
         source="payment_method",
         required=False,
@@ -865,6 +896,17 @@ class TransactionSerializer(
         min_value=Decimal("0.01"),
         write_only=True,
         required=False,
+    )
+
+    initial_paid_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        write_only=True,
+        required=False,
+        help_text=(
+            "Pago inicial usado exclusivamente al crear una "
+            "transacción partial; se registra atómicamente."
+        ),
     )
 
     business_currency = serializers.CharField(
@@ -936,6 +978,7 @@ class TransactionSerializer(
             "concept",
             "total_value",
             "expense_amount",
+            "initial_paid_amount",
             "status_public_id",
             "status_name",
             "invoice_number",
@@ -956,6 +999,45 @@ class TransactionSerializer(
             "is_debt",
             "created_at",
             "updated_at",
+        )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        business_ids = active_membership_business_ids(
+            self.context
+        )
+
+        if business_ids is None:
+            return
+
+        self.fields["business_public_id"].queryset = (
+            Business.objects.filter(pk__in=business_ids)
+        )
+        self.fields["customer_public_id"].queryset = (
+            Customer.objects.filter(
+                business_id__in=business_ids,
+            )
+        )
+        self.fields["supplier_public_id"].queryset = (
+            Supplier.objects.filter(
+                business_id__in=business_ids,
+            )
+        )
+        self.fields["employee_public_id"].queryset = (
+            Employee.objects.filter(
+                business_id__in=business_ids,
+            )
+        )
+        self.fields[
+            "payment_method_public_id"
+        ].queryset = PaymentMethod.objects.filter(
+            business_id__in=business_ids,
+        )
+        self.fields["details"].child.fields[
+            "product_public_id"
+        ].queryset = Product.objects.filter(
+            business_id__in=business_ids,
         )
 
     def validate(self, attrs):
@@ -1071,7 +1153,65 @@ class TransactionSerializer(
             attrs=attrs,
         )
 
+        self._validate_initial_payment_structure(
+            attrs=attrs,
+            transaction_type=transaction_type,
+        )
+
         return attrs
+
+    def _validate_initial_payment_structure(
+        self,
+        *,
+        attrs,
+        transaction_type,
+    ):
+        if self.instance is not None:
+            if "initial_paid_amount" in attrs:
+                raise serializers.ValidationError({
+                    "initial_paid_amount": (
+                        "Este campo solo puede utilizarse al crear "
+                        "una transacción."
+                    ),
+                })
+            return
+
+        payment_status = attrs["payment_status"]
+        payment_method = attrs.get("payment_method")
+        initial_provided = "initial_paid_amount" in attrs
+
+        if (
+            transaction_type == "expense"
+            and payment_status != "paid"
+        ):
+            raise serializers.ValidationError({
+                "payment_status": (
+                    "Los gastos solo admiten el estado paid."
+                ),
+            })
+
+        if payment_status == "pending":
+            if payment_method is not None:
+                raise serializers.ValidationError({
+                    "payment_method_public_id": (
+                        "Debe omitirse para una transacción pendiente."
+                    ),
+                })
+        if payment_status == "partial":
+            if payment_method is None:
+                raise serializers.ValidationError({
+                    "payment_method_public_id": (
+                        "Este campo es requerido para una "
+                        "transacción parcial."
+                    ),
+                })
+            if not initial_provided:
+                raise serializers.ValidationError({
+                    "initial_paid_amount": (
+                        "Este campo es requerido para una "
+                        "transacción parcial."
+                    ),
+                })
 
     def _validate_related_business(
         self,
@@ -1101,6 +1241,12 @@ class TransactionSerializer(
                 continue
 
             if obj.business_id != business.id:
+                if field == "payment_method":
+                    raise serializers.ValidationError({
+                        "payment_method_public_id": (
+                            "La relación indicada no es válida."
+                        ),
+                    })
                 raise serializers.ValidationError({
                     f"{field}_public_id": (
                         f"El recurso indicado en {field} "
@@ -1408,6 +1554,13 @@ class TransactionSerializer(
         self,
         validated_data,
     ):
+        initial_amount_provided = (
+            "initial_paid_amount" in validated_data
+        )
+        initial_paid_amount = validated_data.pop(
+            "initial_paid_amount",
+            None,
+        )
         details_data = validated_data.pop(
             "details",
             [],
@@ -1415,6 +1568,10 @@ class TransactionSerializer(
 
         expense_amount = validated_data.pop(
             "expense_amount",
+            None,
+        )
+        submitted_payment_method = validated_data.pop(
+            "payment_method",
             None,
         )
 
@@ -1441,17 +1598,111 @@ class TransactionSerializer(
                 )
             )
 
+        self._validate_final_payment_contract(
+            transaction=transaction,
+            payment_method=submitted_payment_method,
+            initial_amount_provided=(
+                initial_amount_provided
+            ),
+            initial_paid_amount=initial_paid_amount,
+        )
+
         transaction.save(
             update_fields=[
                 "total_value",
             ]
         )
 
-        self._create_debt_if_required(
-            transaction
+        self._create_financial_records(
+            transaction=transaction,
+            payment_method=submitted_payment_method,
+            initial_paid_amount=initial_paid_amount,
         )
 
         return transaction
+
+    def _validate_final_payment_contract(
+        self,
+        *,
+        transaction,
+        payment_method,
+        initial_amount_provided,
+        initial_paid_amount,
+    ):
+        total = transaction.total_value
+        payment_status = transaction.payment_status
+
+        if total == Decimal("0.00"):
+            if payment_status != "paid":
+                raise serializers.ValidationError({
+                    "payment_status": (
+                        "Una transacción con total cero solo admite paid."
+                    ),
+                })
+            if payment_method is not None:
+                raise serializers.ValidationError({
+                    "payment_method_public_id": (
+                        "Debe omitirse cuando el total es cero."
+                    ),
+                })
+            if (
+                initial_amount_provided
+                and initial_paid_amount != Decimal("0.00")
+            ):
+                raise serializers.ValidationError({
+                    "initial_paid_amount": (
+                        "Debe ser cero cuando el total es cero."
+                    ),
+                })
+            transaction.is_debt = False
+            return
+
+        if payment_status == "paid":
+            if initial_amount_provided:
+                raise serializers.ValidationError({
+                    "initial_paid_amount": (
+                        "Este campo debe omitirse para una "
+                        "transacción pagada."
+                    ),
+                })
+            if payment_method is None:
+                raise serializers.ValidationError({
+                    "payment_method_public_id": (
+                        "Este campo es requerido para una "
+                        "transacción pagada."
+                    ),
+                })
+            transaction.is_debt = False
+            return
+
+        if payment_status == "pending":
+            if (
+                initial_amount_provided
+                and initial_paid_amount != Decimal("0.00")
+            ):
+                raise serializers.ValidationError({
+                    "initial_paid_amount": (
+                        "Debe ser cero para una transacción pendiente."
+                    ),
+                })
+            transaction.is_debt = True
+            return
+
+        if initial_paid_amount <= Decimal("0.00"):
+            raise serializers.ValidationError({
+                "initial_paid_amount": (
+                    "Debe ser mayor que cero."
+                ),
+            })
+
+        if initial_paid_amount >= total:
+            raise serializers.ValidationError({
+                "initial_paid_amount": (
+                    "Debe ser menor que el total de la transacción."
+                ),
+            })
+
+        transaction.is_debt = True
 
     def _set_default_status(
         self,
@@ -1540,14 +1791,34 @@ class TransactionSerializer(
             Decimal("0.01")
         )
 
-    def _create_debt_if_required(
+    def _create_financial_records(
         self,
+        *,
         transaction,
+        payment_method,
+        initial_paid_amount,
     ):
+        if (
+            transaction.total_value > Decimal("0.00")
+            and transaction.payment_status == "paid"
+        ):
+            locked_method = get_locked_active_payment_method(
+                payment_method_id=payment_method.pk,
+                business_id=transaction.business_id,
+            )
+            transaction.payment_method = locked_method
+            transaction.save(
+                update_fields=[
+                    "payment_method",
+                    "updated_at",
+                ],
+            )
+            return
+
         if not transaction.is_debt:
             return
 
-        Debt.objects.create(
+        debt = Debt.objects.create(
             transaction=transaction,
             total_amount=(
                 transaction.total_value
@@ -1558,6 +1829,61 @@ class TransactionSerializer(
             due_date=timezone.localdate(),
             is_settled=False,
         )
+
+        if transaction.payment_status != "partial":
+            return
+
+        payment = register_debt_payment(
+            debt_id=debt.pk,
+            amount=initial_paid_amount,
+            payment_date=timezone.localdate(),
+            payment_method_id=payment_method.pk,
+            submitted_transaction_id=transaction.pk,
+            observed_remaining_amount=transaction.total_value,
+        )
+        transaction.payment_method = payment.payment_method
+        transaction.save(
+            update_fields=[
+                "payment_method",
+                "updated_at",
+            ],
+        )
+
+@extend_schema_field(
+    {
+        "type": "string",
+        "enum": [
+            "sale",
+            "purchase",
+            "expense",
+        ],
+    },
+    component_name="TransactionUpdateType",
+)
+class TransactionUpdateTypeSchemaField(
+    serializers.ChoiceField
+):
+    pass
+
+
+@extend_schema_serializer(
+    exclude_fields=(
+        "details",
+        "expense_amount",
+        "initial_paid_amount",
+        "payment_status",
+    ),
+)
+class TransactionUpdateSchemaSerializer(
+    TransactionSerializer
+):
+    """OpenAPI-only request shape for PUT/PATCH."""
+
+    type = TransactionUpdateTypeSchemaField(
+        choices=Transaction.TRANSACTION_TYPES,
+        required=True,
+    )
+
 
 # ---------- Pagos de Deuda ----------
 class DebtSerializer(serializers.ModelSerializer):
@@ -1652,48 +1978,24 @@ class DebtPaymentSerializer(serializers.ModelSerializer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        request = self.context.get("request")
-        user = getattr(request, "user", None)
+        business_ids = active_membership_business_ids(
+            self.context
+        )
 
-        if (
-            user is not None
-            and user.is_authenticated
-            and user.is_superuser
-        ):
+        if business_ids is None:
             return
 
-        if user is None or not user.is_authenticated:
-            debt_queryset = Debt.objects.none()
-            payment_method_queryset = (
-                PaymentMethod.objects.none()
+        debt_queryset = Debt.objects.filter(
+            transaction__business_id__in=business_ids,
+        )
+        payment_method_queryset = (
+            PaymentMethod.objects.filter(
+                business_id__in=business_ids,
             )
-            transaction_queryset = (
-                Transaction.objects.none()
-            )
-        else:
-            business_ids = (
-                BusinessMembership.objects
-                .filter(
-                    user=user,
-                    is_active=True,
-                )
-                .values("business_id")
-            )
-            debt_queryset = Debt.objects.filter(
-                transaction__business_id__in=(
-                    business_ids
-                ),
-            )
-            payment_method_queryset = (
-                PaymentMethod.objects.filter(
-                    business_id__in=business_ids,
-                )
-            )
-            transaction_queryset = (
-                Transaction.objects.filter(
-                    business_id__in=business_ids,
-                )
-            )
+        )
+        transaction_queryset = Transaction.objects.filter(
+            business_id__in=business_ids,
+        )
 
         self.fields["debt_public_id"].queryset = (
             debt_queryset
