@@ -15,6 +15,17 @@ TERMINAL_TRANSACTION_STATUS_NAMES = (
 )
 
 
+def is_terminal_transaction_status(status_or_name):
+    name = getattr(status_or_name, "name", status_or_name)
+    return (
+        isinstance(name, str)
+        and name.casefold() in {
+            item.casefold()
+            for item in TERMINAL_TRANSACTION_STATUS_NAMES
+        }
+    )
+
+
 def transaction_flow_direction(transaction_or_type):
     transaction_type = getattr(
         transaction_or_type,

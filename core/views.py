@@ -21,7 +21,10 @@ from django_filters import rest_framework as filters
 from core.services.customer_supplier_reports import build_customers_summary, build_suppliers_summary
 from core.services.dashboard import build_dashboard_overview
 from core.services.inventory_report import build_inventory_summary
-from core.services.inventory import record_stock_movement
+from core.services.inventory import (
+    lock_products_for_inventory,
+    record_locked_stock_movement,
+)
 from core.services.financial_flows import (
     direct_payment_transactions,
     exclude_terminal_transactions,
@@ -29,6 +32,7 @@ from core.services.financial_flows import (
 )
 from core.services.monthly_summary import build_monthly_summary
 from core.services.payment_debt_reports import build_debts_summary, build_payments_summary
+from core.services.transaction_cancellation import cancel_transaction
 from .filters import (
     DebtFilter,
     DebtPaymentFilter,
@@ -51,7 +55,6 @@ from django.db.models import (
     Q,
     Sum,
 )
-from collections import defaultdict
 from core.utils import calculate_employee_advance_summary, log_action
 from rest_framework.throttling import ScopedRateThrottle
 from .serializers import (
@@ -65,6 +68,8 @@ from .serializers import (
     CustomerSummaryQuerySerializer,
     DashboardOverviewQuerySerializer,
     DashboardOverviewResponseSerializer,
+    DetailErrorResponseSerializer,
+    InventoryValidationErrorResponseSerializer,
     DebtSummaryResponseSerializer,
     DebtSummaryQuerySerializer,
     EmployeeAccessCreateSerializer,
@@ -79,6 +84,7 @@ from .serializers import (
     PaymentSummaryQuerySerializer,
     PaymentSummaryResponseSerializer,
     SupplierSummaryQuerySerializer,
+    TransactionCancellationConflictResponseSerializer,
     CurrentUserSerializer,
     PublicProductCategorySerializer,
     PublicProductSerializer,
@@ -2811,7 +2817,40 @@ class StockMovementViewSet(BusinessScopedViewSet):
         ),
         examples=[TRANSACTION_UPDATE_EXAMPLE],
     ),
-    destroy=extend_schema(tags=["Transactions"], summary="Baja lógica + neutralizar inventario"),
+    destroy=extend_schema(
+        tags=["Transactions"],
+        summary="Baja lógica + neutralizar inventario",
+        description=(
+            "Anula la transacción y neutraliza su inventario. "
+            "Si existe una deuda con cualquier actividad financiera, "
+            "la operación se rechaza con 409 sin mutaciones parciales."
+        ),
+        responses={
+            204: None,
+            400: OpenApiResponse(
+                response=InventoryValidationErrorResponseSerializer,
+                description=(
+                    "La neutralización de inventario no puede aplicarse, "
+                    "por ejemplo porque dejaría stock negativo."
+                ),
+            ),
+            403: OpenApiResponse(
+                response=DetailErrorResponseSerializer,
+                description="El rol no permite anular la transacción.",
+            ),
+            404: OpenApiResponse(
+                response=DetailErrorResponseSerializer,
+                description="La transacción no es visible para el usuario.",
+            ),
+            409: OpenApiResponse(
+                response=TransactionCancellationConflictResponseSerializer,
+                description=(
+                    "La transacción ya es terminal, su deuda tiene pagos "
+                    "o se detectó un conflicto concurrente."
+                ),
+            ),
+        },
+    ),
 )
 class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     queryset = (
@@ -2832,6 +2871,10 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     serializer_class = TransactionSerializer
     business_lookup = "business"
     soft_delete_status_name = "Anulado"
+    destroy_allowed_roles = [
+        BusinessMembership.ROLE_OWNER,
+        BusinessMembership.ROLE_ADMIN,
+    ]
 
     read_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
@@ -2943,11 +2986,18 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         sign = self._sign_for_tx(tx.type)
 
         if sign is not None:
-            for detail in tx.details.select_related("product"):
-                product = detail.product
+            details = list(tx.details.select_related("product"))
+            locked_products = lock_products_for_inventory(
+                product_ids=(detail.product_id for detail in details),
+                business_id=tx.business_id,
+                require_active=True,
+            )
+
+            for detail in details:
+                product = locked_products[detail.product_id]
                 quantity = detail.quantity
 
-                record_stock_movement(
+                record_locked_stock_movement(
                     product=product,
                     transaction=tx,
                     transaction_detail=detail,
@@ -3020,34 +3070,31 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
         )
 
     @db_tx.atomic
-    def on_soft_delete(self, tx: Transaction):
-        self._validate_business_access(
-            tx.business,
-            allowed_roles=[
-                BusinessMembership.ROLE_OWNER,
-                BusinessMembership.ROLE_ADMIN,
-            ],
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        self.validate_destroy_access(instance)
+
+        terminal_status = self._get_soft_delete_status()
+        if terminal_status is None:
+            return Response(
+                {"detail": "No se encontró un estado válido para la anulación."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        transaction = cancel_transaction(
+            transaction_id=instance.pk,
+            business_id=instance.business_id,
+            terminal_status=terminal_status,
+            actor=request.user,
         )
 
-        # neutraliza inventario y stock
-        totals = defaultdict(int)
-        for pid, qty in tx.stock_movements.all().values_list("product_id", "quantity"):
-            totals[pid] += qty
-
-        for pid, total_qty in totals.items():
-            if total_qty:
-                record_stock_movement(
-                    product=Product(pk=pid),
-                    transaction=tx,
-                    created_by=self.request.user,
-                    movement_type="adjustment",
-                    quantity=-total_qty,
-                    note=f"Auto neutralize {tx.public_id}",
-                    insufficient_stock_message=(
-                        "No se puede eliminar la transacción porque "
-                        "dejaría stock negativo en un producto."
-                    ),
-                )
+        log_action(
+            request.user,
+            "CANCEL",
+            transaction.__class__.__name__,
+            transaction.pk,
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
     
 @extend_schema_view(
     list=extend_schema(tags=["Debts"], summary="Listar deudas"),

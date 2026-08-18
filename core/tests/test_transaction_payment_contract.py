@@ -558,7 +558,7 @@ class TransactionPaymentContractTests(BusinessIsolationTestCase):
         self.assertEqual(DebtPayment.objects.count(), 0)
 
         with patch(
-            "core.views.record_stock_movement",
+            "core.views.record_locked_stock_movement",
             side_effect=RuntimeError("forced inventory failure"),
         ):
             with self.assertRaises(RuntimeError):

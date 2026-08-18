@@ -10,14 +10,15 @@ from core.models import (
     PaymentMethod,
     Transaction,
 )
+from core.services.financial_flows import (
+    TERMINAL_TRANSACTION_STATUS_NAMES as TERMINAL_STATUS_DISPLAY_NAMES,
+    is_terminal_transaction_status,
+)
 
 
 TERMINAL_TRANSACTION_STATUS_NAMES = {
-    "anulado",
-    "cancelado",
-    "eliminado",
-    "void",
-    "deleted",
+    name.casefold()
+    for name in TERMINAL_STATUS_DISPLAY_NAMES
 }
 
 
@@ -102,10 +103,7 @@ def register_debt_payment(
         .get(pk=debt.transaction_id)
     )
 
-    if (
-        transaction.status.name.casefold()
-        in TERMINAL_TRANSACTION_STATUS_NAMES
-    ):
+    if is_terminal_transaction_status(transaction.status):
         raise DebtPaymentConflict({
             "non_field_errors": (
                 "No se puede registrar un pago contra "

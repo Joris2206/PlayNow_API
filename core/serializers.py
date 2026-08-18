@@ -3208,6 +3208,19 @@ class FinancialDatePeriodResponseSerializer(serializers.Serializer):
     date_to = serializers.DateField()
 
 
+class DetailErrorResponseSerializer(serializers.Serializer):
+    detail = serializers.CharField()
+
+
+class InventoryValidationErrorResponseSerializer(serializers.Serializer):
+    details = serializers.CharField()
+
+
+class TransactionCancellationConflictResponseSerializer(serializers.Serializer):
+    detail = serializers.CharField(required=False)
+    non_field_errors = serializers.CharField(required=False)
+
+
 class CountAmountResponseSerializer(serializers.Serializer):
     count = serializers.IntegerField()
     total = financial_amount_field()
