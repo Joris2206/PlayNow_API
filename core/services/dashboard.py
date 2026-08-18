@@ -1,7 +1,8 @@
 from datetime import date
 from decimal import Decimal
 
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, DecimalField, F, Q, Sum, Value
+from django.db.models.functions import Coalesce
 
 from core.models import (
     CashRegister,
@@ -12,10 +13,17 @@ from core.models import (
     Transaction,
 )
 from core.services.customer_supplier_reports import (
-    EXCLUDED_STATUS_NAMES,
     decimal_or_zero,
     get_report_datetime_range,
 )
+from core.services.financial_flows import (
+    direct_payment_transactions,
+    exclude_terminal_transactions,
+    recognized_debt_payments,
+)
+
+
+MONEY_FIELD = DecimalField(max_digits=12, decimal_places=2)
 
 
 def build_dashboard_overview(
@@ -32,15 +40,11 @@ def build_dashboard_overview(
         )
     )
 
-    transactions = (
-        Transaction.objects
-        .filter(
+    transactions = exclude_terminal_transactions(
+        Transaction.objects.filter(
             business=business,
             created_at__gte=start_datetime,
             created_at__lt=end_datetime,
-        )
-        .exclude(
-            status__name__in=EXCLUDED_STATUS_NAMES
         )
     )
 
@@ -71,85 +75,87 @@ def build_dashboard_overview(
         ),
     )
 
-    debt_payments = (
-        DebtPayment.objects
-        .filter(
+    direct_payments = direct_payment_transactions(transactions)
+    direct_payment_totals = direct_payments.aggregate(
+        sales=Sum("total_value", filter=Q(type="sale")),
+        purchases=Sum("total_value", filter=Q(type="purchase")),
+        expenses=Sum("total_value", filter=Q(type="expense")),
+    )
+
+    debt_payments = recognized_debt_payments(
+        DebtPayment.objects.filter(
             debt__transaction__business=business,
             payment_date__gte=date_from,
             payment_date__lte=date_to,
         )
-        .exclude(
-            debt__transaction__status__name__in=(
-                EXCLUDED_STATUS_NAMES
-            )
-        )
-        .aggregate(
-            count=Count("id"),
-            total=Sum("amount"),
-        )
+    )
+    debt_payment_totals = debt_payments.aggregate(
+        count=Count("id"),
+        received=Sum("amount", filter=Q(debt__transaction__type="sale")),
+        made=Sum("amount", filter=Q(debt__transaction__type="purchase")),
     )
 
-    valid_debts = (
-        Debt.objects
-        .filter(
+    valid_debts = exclude_terminal_transactions(
+        Debt.objects.filter(
             transaction__business=business,
             transaction__created_at__lt=end_datetime,
-        )
-        .exclude(
-            transaction__status__name__in=(
-                EXCLUDED_STATUS_NAMES
-            )
-        )
-    )
-
-    debt_totals = valid_debts.aggregate(
-        original_total=Sum("total_amount"),
-    )
-
-    payments_until_period_end = (
-        DebtPayment.objects
-        .filter(
-            debt__in=valid_debts,
-            payment_date__lte=date_to,
-        )
-        .aggregate(
-            total=Sum("amount"),
-        )
-    )
-
-    outstanding_debt = max(
-        decimal_or_zero(
-            debt_totals["original_total"]
-        )
-        - decimal_or_zero(
-            payments_until_period_end["total"]
         ),
-        Decimal("0.00"),
-    ).quantize(
-        Decimal("0.01")
+        status_lookup="transaction__status__name",
+    )
+    debts_at_end = valid_debts.annotate(
+        paid_until_end=Coalesce(
+            Sum("payments__amount", filter=Q(payments__payment_date__lte=date_to)),
+            Value(Decimal("0.00")),
+            output_field=MONEY_FIELD,
+        )
     )
 
-    pending_debts_count = 0
-
-    for debt in valid_debts:
-        paid_until_end = (
-            debt.payments
-            .filter(
-                payment_date__lte=date_to,
-            )
-            .aggregate(
-                total=Sum("amount"),
-            )["total"]
+    def debt_position(transaction_type):
+        directional = (
+            valid_debts.filter(transaction__type=transaction_type)
+            if transaction_type is not None
+            else valid_debts.exclude(transaction__type__in=("sale", "purchase"))
         )
+        queryset = debts_at_end.filter(pk__in=directional.values("pk"))
+        original = directional.aggregate(
+            total=Sum("total_amount")
+        )["total"]
+        paid = DebtPayment.objects.filter(
+            debt__in=directional,
+            payment_date__lte=date_to,
+        ).aggregate(total=Sum("amount"))["total"]
+        outstanding = max(
+            decimal_or_zero(original) - decimal_or_zero(paid),
+            Decimal("0.00"),
+        ).quantize(Decimal("0.01"))
+        return {
+            "outstanding": outstanding,
+            "pending_count": queryset.filter(paid_until_end__lt=F("total_amount")).count(),
+        }
 
-        if (
-            debt.total_amount
-            - decimal_or_zero(
-                paid_until_end
-            )
-            > 0
-        ):
-            pending_debts_count += 1
+    receivables = debt_position("sale")
+    payables = debt_position("purchase")
+    unclassified_debts = debt_position(None)
+    outstanding_debt = (
+        receivables["outstanding"]
+        + payables["outstanding"]
+        + unclassified_debts["outstanding"]
+    ).quantize(Decimal("0.01"))
+    pending_debts_count = (
+        receivables["pending_count"]
+        + payables["pending_count"]
+        + unclassified_debts["pending_count"]
+    )
+
+    direct_received = decimal_or_zero(direct_payment_totals["sales"])
+    direct_made = (
+        decimal_or_zero(direct_payment_totals["purchases"])
+        + decimal_or_zero(direct_payment_totals["expenses"])
+    ).quantize(Decimal("0.01"))
+    debt_received = decimal_or_zero(debt_payment_totals["received"])
+    debt_made = decimal_or_zero(debt_payment_totals["made"])
+    payments_received = (direct_received + debt_received).quantize(Decimal("0.01"))
+    payments_made = (direct_made + debt_made).quantize(Decimal("0.01"))
 
     closed_cash_registers = (
         CashRegister.objects
@@ -303,11 +309,14 @@ def build_dashboard_overview(
             "outstanding_debt": str(
                 outstanding_debt
             ),
+            "outstanding_receivables": str(receivables["outstanding"]),
+            "outstanding_payables": str(payables["outstanding"]),
             "debt_payments_received": str(
-                decimal_or_zero(
-                    debt_payments["total"]
-                )
+                debt_received
             ),
+            "debt_payments_made": str(debt_made),
+            "payments_received": str(payments_received),
+            "payments_made": str(payments_made),
             "pending_commissions": str(
                 decimal_or_zero(
                     commission_totals[
@@ -343,7 +352,7 @@ def build_dashboard_overview(
                 ]
             ),
             "debt_payments_count": (
-                debt_payments["count"]
+                debt_payment_totals["count"]
             ),
             "pending_debts_count": (
                 pending_debts_count

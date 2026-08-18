@@ -8,6 +8,7 @@ from decimal import Decimal
 
 from django.db.models import (
     Count,
+    Q,
     Sum,
 )
 from django.utils import timezone as django_timezone
@@ -19,16 +20,11 @@ from core.models import (
     DebtPayment,
     Transaction,
 )
-
-
-EXCLUDED_STATUS_NAMES = [
-    "Eliminado",
-    "Anulado",
-    "Cancelado",
-    "Void",
-    "Deleted",
-]
-
+from core.services.financial_flows import (
+    direct_payment_transactions,
+    exclude_terminal_transactions,
+    recognized_debt_payments,
+)
 
 def decimal_or_zero(
     value,
@@ -135,17 +131,11 @@ def build_monthly_summary(
         "end_datetime"
     ]
 
-    base_transactions = (
-        Transaction.objects
-        .filter(
+    base_transactions = exclude_terminal_transactions(
+        Transaction.objects.filter(
             business=business,
             created_at__gte=period_start,
             created_at__lt=period_end,
-        )
-        .exclude(
-            status__name__in=(
-                EXCLUDED_STATUS_NAMES
-            )
         )
     )
 
@@ -184,12 +174,9 @@ def build_monthly_summary(
         "expense"
     )
 
+    direct_payments = direct_payment_transactions(base_transactions)
     paid_sales = (
-        base_transactions
-        .filter(
-            type="sale",
-            payment_status="paid",
-        )
+        direct_payments.filter(type="sale")
         .aggregate(
             count=Count("id"),
             total=Sum("total_value"),
@@ -197,24 +184,15 @@ def build_monthly_summary(
     )
 
     debt_sales = (
-        base_transactions
-        .filter(
-            type="sale",
-            is_debt=True,
-            payment_status__in=[
-                "pending",
-                "partial",
-            ],
-        )
+        base_transactions.filter(type="sale", debts__isnull=False)
         .aggregate(
             count=Count("id"),
             total=Sum("total_value"),
         )
     )
 
-    debt_generated = (
-        Debt.objects
-        .filter(
+    debt_generated = exclude_terminal_transactions(
+        Debt.objects.filter(
             transaction__business=business,
             transaction__created_at__gte=(
                 period_start
@@ -222,64 +200,80 @@ def build_monthly_summary(
             transaction__created_at__lt=(
                 period_end
             ),
-        )
-        .exclude(
-            transaction__status__name__in=(
-                EXCLUDED_STATUS_NAMES
-            )
-        )
-        .aggregate(
+        ),
+        status_lookup="transaction__status__name",
+    ).aggregate(
             count=Count("id"),
             total=Sum("total_amount"),
-        )
     )
 
-    debt_payments = (
-        DebtPayment.objects
-        .filter(
+    debt_payment_queryset = recognized_debt_payments(
+        DebtPayment.objects.filter(
             debt__transaction__business=business,
             payment_date__gte=start_date,
             payment_date__lte=end_date,
         )
-        .aggregate(
-            count=Count("id"),
-            total=Sum("amount"),
-        )
+    )
+    debt_payments = debt_payment_queryset.aggregate(
+        count=Count("id"),
+        total=Sum("amount"),
+        received=Sum("amount", filter=Q(debt__transaction__type="sale")),
+        made=Sum("amount", filter=Q(debt__transaction__type="purchase")),
+    )
+    direct_payment_totals = direct_payments.aggregate(
+        sales=Sum("total_value", filter=Q(type="sale")),
+        purchases=Sum("total_value", filter=Q(type="purchase")),
+        expenses=Sum("total_value", filter=Q(type="expense")),
     )
 
-    outstanding_debt = (
-        Debt.objects
-        .filter(
+    valid_debts = exclude_terminal_transactions(
+        Debt.objects.filter(
             transaction__business=business,
-            transaction__created_at__lt=(
-                period_end
-            ),
-            is_settled=False,
-        )
-        .exclude(
-            transaction__status__name__in=(
-                EXCLUDED_STATUS_NAMES
-            )
-        )
-        .aggregate(
-            total=Sum("total_amount"),
-            paid=Sum("paid_amount"),
-        )
+            transaction__created_at__lt=period_end,
+        ),
+        status_lookup="transaction__status__name",
     )
 
-    outstanding_total = max(
-        (
-            decimal_or_zero(
-                outstanding_debt["total"]
-            )
-            - decimal_or_zero(
-                outstanding_debt["paid"]
-            )
-        ),
-        Decimal("0.00"),
-    ).quantize(
-        Decimal("0.01")
+    def outstanding_for(transaction_type):
+        directional = valid_debts.filter(transaction__type=transaction_type)
+        original = directional.aggregate(total=Sum("total_amount"))["total"]
+        paid = DebtPayment.objects.filter(
+            debt__in=directional,
+            payment_date__lte=end_date,
+        ).aggregate(total=Sum("amount"))["total"]
+        return max(
+            decimal_or_zero(original) - decimal_or_zero(paid),
+            Decimal("0.00"),
+        ).quantize(Decimal("0.01"))
+
+    outstanding_receivables = outstanding_for("sale")
+    outstanding_payables = outstanding_for("purchase")
+    unclassified_debts = valid_debts.exclude(
+        transaction__type__in=("sale", "purchase")
     )
+    unclassified_original = unclassified_debts.aggregate(total=Sum("total_amount"))["total"]
+    unclassified_paid = DebtPayment.objects.filter(
+        debt__in=unclassified_debts,
+        payment_date__lte=end_date,
+    ).aggregate(total=Sum("amount"))["total"]
+    outstanding_unclassified = max(
+        decimal_or_zero(unclassified_original) - decimal_or_zero(unclassified_paid),
+        Decimal("0.00"),
+    ).quantize(Decimal("0.01"))
+    outstanding_total = (
+        outstanding_receivables
+        + outstanding_payables
+        + outstanding_unclassified
+    ).quantize(Decimal("0.01"))
+    debt_received = decimal_or_zero(debt_payments["received"])
+    debt_made = decimal_or_zero(debt_payments["made"])
+    direct_received = decimal_or_zero(direct_payment_totals["sales"])
+    direct_made = (
+        decimal_or_zero(direct_payment_totals["purchases"])
+        + decimal_or_zero(direct_payment_totals["expenses"])
+    ).quantize(Decimal("0.01"))
+    payments_received = (direct_received + debt_received).quantize(Decimal("0.01"))
+    payments_made = (direct_made + debt_made).quantize(Decimal("0.01"))
 
     closed_registers = (
         CashRegister.objects
@@ -463,9 +457,23 @@ def build_monthly_summary(
                     debt_payments["total"]
                 )
             ),
+            "payments_received": str(debt_received),
+            "payments_made": str(debt_made),
+            "outstanding_receivables": str(outstanding_receivables),
+            "outstanding_payables": str(outstanding_payables),
+            "outstanding_unclassified": str(outstanding_unclassified),
             "outstanding_at_period_end": str(
                 outstanding_total
             ),
+        },
+        "payments": {
+            "received": str(payments_received),
+            "made": str(payments_made),
+            "net": str((payments_received - payments_made).quantize(Decimal("0.01"))),
+            "direct_sales": str(direct_received),
+            "direct_purchases_and_expenses": str(direct_made),
+            "debt_payments_received": str(debt_received),
+            "debt_payments_made": str(debt_made),
         },
         "cash_registers": {
             "closed_count": (

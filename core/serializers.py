@@ -3187,6 +3187,330 @@ class MonthlySummaryQuerySerializer(
         max_value=12,
     )
 
+
+# ---------- Contratos estructurados de reportes financieros ----------
+def financial_amount_field(**kwargs):
+    return serializers.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        **kwargs,
+    )
+
+
+class FinancialBusinessResponseSerializer(serializers.Serializer):
+    public_id = serializers.UUIDField()
+    name = serializers.CharField()
+    currency = serializers.CharField()
+
+
+class FinancialDatePeriodResponseSerializer(serializers.Serializer):
+    date_from = serializers.DateField()
+    date_to = serializers.DateField()
+
+
+class CountAmountResponseSerializer(serializers.Serializer):
+    count = serializers.IntegerField()
+    total = financial_amount_field()
+
+
+class CashSummaryPeriodResponseSerializer(serializers.Serializer):
+    open_time = serializers.DateTimeField()
+    until = serializers.DateTimeField()
+
+
+class CashSummarySalesResponseSerializer(serializers.Serializer):
+    cash = financial_amount_field()
+    card = financial_amount_field()
+    transfer = financial_amount_field()
+    other = financial_amount_field()
+    total = financial_amount_field()
+
+
+class CashSummaryMovementsResponseSerializer(serializers.Serializer):
+    deposits = financial_amount_field()
+    withdrawals = financial_amount_field()
+    employee_advances = financial_amount_field()
+    employee_repayments = financial_amount_field()
+    other_income = financial_amount_field()
+    other_expense = financial_amount_field()
+
+
+class CashRegisterSummaryResponseSerializer(serializers.Serializer):
+    period = CashSummaryPeriodResponseSerializer()
+    opening_balance = financial_amount_field()
+    sales = CashSummarySalesResponseSerializer()
+    cash_purchases = financial_amount_field()
+    cash_expenses = financial_amount_field()
+    cash_debt_payments = financial_amount_field(
+        help_text=(
+            "Campo legado: suma bruta de DebtPayments cash recibidos "
+            "y realizados. No debe usarse para calcular efectivo neto."
+        ),
+    )
+    cash_debt_payments_received = financial_amount_field()
+    cash_debt_payments_made = financial_amount_field()
+    automatic_cash_inflows = financial_amount_field()
+    automatic_cash_outflows = financial_amount_field()
+    movements = CashSummaryMovementsResponseSerializer()
+    expected_closing_balance = financial_amount_field()
+
+
+class PaymentMethodSummaryResponseSerializer(serializers.Serializer):
+    public_id = serializers.UUIDField()
+    name = serializers.CharField()
+    method_type = serializers.ChoiceField(
+        choices=PaymentMethod.METHOD_TYPES,
+    )
+
+
+class PaymentMethodBreakdownResponseSerializer(serializers.Serializer):
+    payment_method = PaymentMethodSummaryResponseSerializer()
+    sales = CountAmountResponseSerializer()
+    purchases = CountAmountResponseSerializer()
+    expenses = CountAmountResponseSerializer()
+    debt_payments = CountAmountResponseSerializer()
+    debt_payments_received = CountAmountResponseSerializer()
+    debt_payments_made = CountAmountResponseSerializer()
+    total_incoming = financial_amount_field()
+    total_outgoing = financial_amount_field()
+    net_amount = financial_amount_field()
+
+
+class PaymentSummaryTotalsResponseSerializer(serializers.Serializer):
+    sales = CountAmountResponseSerializer()
+    purchases = CountAmountResponseSerializer()
+    expenses = CountAmountResponseSerializer()
+    debt_payments = CountAmountResponseSerializer()
+    debt_payments_received = CountAmountResponseSerializer()
+    debt_payments_made = CountAmountResponseSerializer()
+    payments_received = financial_amount_field()
+    payments_made = financial_amount_field()
+    incoming_total = financial_amount_field()
+    outgoing_total = financial_amount_field()
+    net_amount = financial_amount_field()
+
+
+class PaymentSummaryResponseSerializer(serializers.Serializer):
+    business = FinancialBusinessResponseSerializer()
+    period = FinancialDatePeriodResponseSerializer()
+    totals = PaymentSummaryTotalsResponseSerializer()
+    results = PaymentMethodBreakdownResponseSerializer(many=True)
+
+
+class DebtDirectionSummaryResponseSerializer(serializers.Serializer):
+    count = serializers.IntegerField()
+    settled_count = serializers.IntegerField()
+    pending_count = serializers.IntegerField()
+    original_total = financial_amount_field()
+    paid_total = financial_amount_field()
+    outstanding = financial_amount_field()
+
+
+class DebtPartyResponseSerializer(serializers.Serializer):
+    public_id = serializers.UUIDField()
+    name = serializers.CharField()
+    full_name = serializers.CharField(required=False)
+
+
+class DebtIdentityResponseSerializer(serializers.Serializer):
+    public_id = serializers.UUIDField()
+    transaction_public_id = serializers.UUIDField()
+
+
+class DebtTransactionResponseSerializer(serializers.Serializer):
+    public_id = serializers.UUIDField()
+    type = serializers.SerializerMethodField()
+
+    @extend_schema_field({
+        "type": "string",
+        "enum": ["sale", "purchase", "expense"],
+    })
+    def get_type(self, obj):
+        if isinstance(obj, dict):
+            return obj.get("type")
+        return obj.type
+
+
+class DebtDetailResponseSerializer(serializers.Serializer):
+    debt = DebtIdentityResponseSerializer()
+    transaction = DebtTransactionResponseSerializer()
+    direction = serializers.ChoiceField(
+        choices=("receivable", "payable", "unclassified"),
+    )
+    customer = DebtPartyResponseSerializer(allow_null=True)
+    supplier = DebtPartyResponseSerializer(allow_null=True)
+    employee = DebtPartyResponseSerializer(allow_null=True)
+    total_amount = financial_amount_field()
+    total = financial_amount_field()
+    paid_until_period_end = financial_amount_field()
+    paid = financial_amount_field()
+    pending_at_period_end = financial_amount_field()
+    outstanding = financial_amount_field()
+    is_settled_at_period_end = serializers.BooleanField()
+    is_settled = serializers.BooleanField()
+    due_date = serializers.DateField()
+    was_overdue_at_period_end = serializers.BooleanField()
+
+
+class DebtPortfolioResponseSerializer(serializers.Serializer):
+    original_debt_total = financial_amount_field()
+    paid_until_period_end = financial_amount_field()
+    outstanding = financial_amount_field()
+    overdue_outstanding = financial_amount_field()
+
+
+class DebtSummaryResponseSerializer(serializers.Serializer):
+    business = FinancialBusinessResponseSerializer()
+    period = FinancialDatePeriodResponseSerializer()
+    generated = CountAmountResponseSerializer()
+    payments_received = CountAmountResponseSerializer()
+    payments_made = CountAmountResponseSerializer()
+    accounts_receivable = DebtDirectionSummaryResponseSerializer()
+    accounts_payable = DebtDirectionSummaryResponseSerializer()
+    unclassified = DebtDirectionSummaryResponseSerializer()
+    portfolio_at_period_end = DebtPortfolioResponseSerializer()
+    results = DebtDetailResponseSerializer(many=True)
+
+
+class DashboardCardsResponseSerializer(serializers.Serializer):
+    sales_total = financial_amount_field()
+    purchases_total = financial_amount_field()
+    expenses_total = financial_amount_field()
+    gross_margin_before_costs = financial_amount_field()
+    outstanding_debt = financial_amount_field(
+        help_text=(
+            "Agregado bruto legado. Para nuevas integraciones use "
+            "outstanding_receivables y outstanding_payables."
+        ),
+    )
+    outstanding_receivables = financial_amount_field()
+    outstanding_payables = financial_amount_field()
+    debt_payments_received = financial_amount_field()
+    debt_payments_made = financial_amount_field()
+    payments_received = financial_amount_field()
+    payments_made = financial_amount_field()
+    pending_commissions = financial_amount_field()
+    cash_difference = financial_amount_field()
+    current_inventory_units = serializers.IntegerField()
+
+
+class DashboardActivityResponseSerializer(serializers.Serializer):
+    sales_count = serializers.IntegerField()
+    purchases_count = serializers.IntegerField()
+    expenses_count = serializers.IntegerField()
+    debt_payments_count = serializers.IntegerField()
+    pending_debts_count = serializers.IntegerField()
+    closed_cash_registers_count = serializers.IntegerField()
+    open_cash_register = serializers.BooleanField()
+    low_stock_items_count = serializers.IntegerField()
+    out_of_stock_items_count = serializers.IntegerField()
+
+
+class DashboardCommissionsResponseSerializer(serializers.Serializer):
+    gross_total = financial_amount_field()
+    net_total = financial_amount_field()
+    pending_total = financial_amount_field()
+    paid_total = financial_amount_field()
+
+
+class DashboardCashResponseSerializer(serializers.Serializer):
+    closed_count = serializers.IntegerField()
+    expected_total = financial_amount_field()
+    counted_total = financial_amount_field()
+    difference_total = financial_amount_field()
+
+
+class DashboardOverviewResponseSerializer(serializers.Serializer):
+    business = FinancialBusinessResponseSerializer()
+    period = FinancialDatePeriodResponseSerializer()
+    cards = DashboardCardsResponseSerializer()
+    activity = DashboardActivityResponseSerializer()
+    commissions = DashboardCommissionsResponseSerializer()
+    cash = DashboardCashResponseSerializer()
+
+
+class MonthlyPeriodResponseSerializer(serializers.Serializer):
+    year = serializers.IntegerField()
+    month = serializers.IntegerField()
+    date_from = serializers.DateField()
+    date_to = serializers.DateField()
+
+
+class MonthlyTransactionVolumeResponseSerializer(serializers.Serializer):
+    count = serializers.IntegerField()
+    total = financial_amount_field()
+
+
+class MonthlySalesResponseSerializer(MonthlyTransactionVolumeResponseSerializer):
+    paid_count = serializers.IntegerField()
+    paid_total = financial_amount_field()
+    debt_count = serializers.IntegerField()
+    debt_total = financial_amount_field()
+
+
+class MonthlyTransactionsResponseSerializer(serializers.Serializer):
+    sales = MonthlySalesResponseSerializer()
+    purchases = MonthlyTransactionVolumeResponseSerializer()
+    expenses = MonthlyTransactionVolumeResponseSerializer()
+
+
+class MonthlyDebtsResponseSerializer(serializers.Serializer):
+    generated_count = serializers.IntegerField()
+    generated_total = financial_amount_field()
+    payments_count = serializers.IntegerField()
+    payments_total = financial_amount_field()
+    payments_received = financial_amount_field()
+    payments_made = financial_amount_field()
+    outstanding_receivables = financial_amount_field()
+    outstanding_payables = financial_amount_field()
+    outstanding_unclassified = financial_amount_field()
+    outstanding_at_period_end = financial_amount_field(
+        help_text="Agregado bruto legado de saldos pendientes al cierre.",
+    )
+
+
+class MonthlyPaymentsResponseSerializer(serializers.Serializer):
+    received = financial_amount_field()
+    made = financial_amount_field()
+    net = financial_amount_field()
+    direct_sales = financial_amount_field()
+    direct_purchases_and_expenses = financial_amount_field()
+    debt_payments_received = financial_amount_field()
+    debt_payments_made = financial_amount_field()
+
+
+class MonthlyCashRegistersResponseSerializer(serializers.Serializer):
+    closed_count = serializers.IntegerField()
+    opening_total = financial_amount_field()
+    expected_total = financial_amount_field()
+    counted_total = financial_amount_field()
+    difference_total = financial_amount_field()
+    shortages_total = financial_amount_field()
+    surpluses_total = financial_amount_field()
+
+
+class MonthlyCommissionsResponseSerializer(serializers.Serializer):
+    settlements_count = serializers.IntegerField()
+    settled_sales_total = financial_amount_field()
+    gross_commission_total = financial_amount_field()
+    employee_advances = financial_amount_field()
+    employee_repayments = financial_amount_field()
+    advance_balance = financial_amount_field()
+    net_commission_payable = financial_amount_field()
+    remaining_advance_balance = financial_amount_field()
+    paid = CountAmountResponseSerializer()
+    pending = CountAmountResponseSerializer()
+
+
+class MonthlySummaryResponseSerializer(serializers.Serializer):
+    business = FinancialBusinessResponseSerializer()
+    period = MonthlyPeriodResponseSerializer()
+    transactions = MonthlyTransactionsResponseSerializer()
+    debts = MonthlyDebtsResponseSerializer()
+    payments = MonthlyPaymentsResponseSerializer()
+    cash_registers = MonthlyCashRegistersResponseSerializer()
+    commissions = MonthlyCommissionsResponseSerializer()
+
 class MonthlyClosureCreateSerializer(
     serializers.Serializer
 ):

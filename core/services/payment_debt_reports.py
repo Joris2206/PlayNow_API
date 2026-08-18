@@ -1,669 +1,278 @@
 from datetime import date
 from decimal import Decimal
 
-from django.db.models import Count, Sum
+from django.db.models import Count, DecimalField, F, Q, Sum, Value
+from django.db.models.functions import Coalesce
 
-from core.models import (
-    Debt,
-    DebtPayment,
-    PaymentMethod,
-    Transaction,
-)
-from core.services.customer_supplier_reports import (
-    EXCLUDED_STATUS_NAMES,
-    decimal_or_zero,
-    get_report_datetime_range,
+from core.models import Debt, DebtPayment, PaymentMethod, Transaction
+from core.services.customer_supplier_reports import decimal_or_zero, get_report_datetime_range
+from core.services.financial_flows import (
+    direct_payment_transactions,
+    exclude_terminal_transactions,
+    recognized_debt_payments,
 )
 
 
-def build_payments_summary(
-    *,
-    business,
-    date_from: date,
-    date_to: date,
-    payment_method=None,
-) -> dict:
-    """
-    Resume entradas y salidas por métodos de pago.
+MONEY_FIELD = DecimalField(max_digits=12, decimal_places=2)
 
-    Entradas:
-    - ventas pagadas directamente;
-    - abonos de deudas.
 
-    Salidas:
-    - compras;
-    - gastos.
+def _group_by_method(queryset, prefix, amount_field):
+    return {
+        row["payment_method_id"]: row
+        for row in queryset.values("payment_method_id").annotate(**{
+            f"{prefix}_count": Count("id"),
+            f"{prefix}_total": Sum(amount_field),
+        })
+    }
 
-    No mezcla ventas pendientes con dinero realmente recibido.
-    """
-    start_datetime, end_datetime = (
-        get_report_datetime_range(
-            date_from=date_from,
-            date_to=date_to,
-        )
+
+def _summary(queryset, amount_field):
+    result = queryset.aggregate(count=Count("id"), total=Sum(amount_field))
+    return {"count": result["count"], "total": decimal_or_zero(result["total"])}
+
+
+def _render_summary(summary):
+    return {"count": summary["count"], "total": str(summary["total"])}
+
+
+def build_payments_summary(*, business, date_from: date, date_to: date, payment_method=None) -> dict:
+    """Recognize direct payments and historical-debt payments exactly once."""
+    start_datetime, end_datetime = get_report_datetime_range(
+        date_from=date_from, date_to=date_to,
     )
-
-    transactions = (
-        Transaction.objects
-        .filter(
-            business=business,
-            created_at__gte=start_datetime,
-            created_at__lt=end_datetime,
-        )
-        .exclude(
-            status__name__in=EXCLUDED_STATUS_NAMES
-        )
-    )
-
+    transactions = exclude_terminal_transactions(Transaction.objects.filter(
+        business=business,
+        created_at__gte=start_datetime,
+        created_at__lt=end_datetime,
+    ))
+    direct = direct_payment_transactions(transactions)
+    debt_payments = recognized_debt_payments(DebtPayment.objects.filter(
+        debt__transaction__business=business,
+        payment_date__gte=date_from,
+        payment_date__lte=date_to,
+    ))
     if payment_method is not None:
-        transactions = transactions.filter(
-            payment_method=payment_method
-        )
+        direct = direct.filter(payment_method=payment_method)
+        debt_payments = debt_payments.filter(payment_method=payment_method)
 
-    paid_sales = transactions.filter(
-        type="sale",
-        payment_status="paid",
-        payment_method__isnull=False,
-    )
-
-    purchases = transactions.filter(
-        type="purchase",
-        payment_method__isnull=False,
-    )
-
-    expenses = transactions.filter(
-        type="expense",
-        payment_method__isnull=False,
-    )
-
-    debt_payments = (
-        DebtPayment.objects
-        .filter(
-            debt__transaction__business=business,
-            payment_date__gte=date_from,
-            payment_date__lte=date_to,
-        )
-        .exclude(
-            debt__transaction__status__name__in=(
-                EXCLUDED_STATUS_NAMES
-            )
-        )
-    )
-
-    if payment_method is not None:
-        debt_payments = debt_payments.filter(
-            payment_method=payment_method
-        )
-
-    sales_by_method = {
-        row["payment_method_id"]: row
-        for row in (
-            paid_sales
-            .values(
-                "payment_method_id",
-                "payment_method__public_id",
-                "payment_method__name",
-                "payment_method__method_type",
-            )
-            .annotate(
-                sales_count=Count("id"),
-                sales_total=Sum("total_value"),
-            )
-        )
+    sources = {
+        "sales": (direct.filter(type="sale"), "total_value"),
+        "purchases": (direct.filter(type="purchase"), "total_value"),
+        "expenses": (direct.filter(type="expense"), "total_value"),
+        "received": (debt_payments.filter(debt__transaction__type="sale"), "amount"),
+        "made": (debt_payments.filter(debt__transaction__type="purchase"), "amount"),
     }
-
-    purchases_by_method = {
-        row["payment_method_id"]: row
-        for row in (
-            purchases
-            .values("payment_method_id")
-            .annotate(
-                purchases_count=Count("id"),
-                purchases_total=Sum(
-                    "total_value"
-                ),
-            )
-        )
+    grouped = {
+        name: _group_by_method(queryset, name, amount_field)
+        for name, (queryset, amount_field) in sources.items()
     }
-
-    expenses_by_method = {
-        row["payment_method_id"]: row
-        for row in (
-            expenses
-            .values("payment_method_id")
-            .annotate(
-                expenses_count=Count("id"),
-                expenses_total=Sum(
-                    "total_value"
-                ),
-            )
-        )
-    }
-
-    debt_by_method = {
-        row["payment_method_id"]: row
-        for row in (
-            debt_payments
-            .values("payment_method_id")
-            .annotate(
-                debt_payments_count=Count("id"),
-                debt_payments_total=Sum("amount"),
-            )
-        )
-    }
-
-    method_ids = (
-        set(sales_by_method)
-        | set(purchases_by_method)
-        | set(expenses_by_method)
-        | set(debt_by_method)
-    )
-
-    methods = (
-        PaymentMethod.objects
-        .filter(
-            business=business,
-            id__in=method_ids,
-        )
-        .order_by("name")
-    )
+    method_ids = set().union(*(set(rows) for rows in grouped.values()))
+    methods = PaymentMethod.objects.filter(
+        business=business, id__in=method_ids,
+    ).order_by("name")
 
     results = []
-
     for method in methods:
-        sales_row = sales_by_method.get(
-            method.id,
-            {},
-        )
+        rows = {name: data.get(method.id, {}) for name, data in grouped.items()}
+        amounts = {
+            name: decimal_or_zero(row.get(f"{name}_total"))
+            for name, row in rows.items()
+        }
+        incoming = (amounts["sales"] + amounts["received"]).quantize(Decimal("0.01"))
+        outgoing = (
+            amounts["purchases"] + amounts["expenses"] + amounts["made"]
+        ).quantize(Decimal("0.01"))
+        debt_total = (amounts["received"] + amounts["made"]).quantize(Decimal("0.01"))
 
-        purchases_row = purchases_by_method.get(
-            method.id,
-            {},
-        )
-
-        expenses_row = expenses_by_method.get(
-            method.id,
-            {},
-        )
-
-        debt_row = debt_by_method.get(
-            method.id,
-            {},
-        )
-
-        sales_total = decimal_or_zero(
-            sales_row.get("sales_total")
-        )
-
-        debt_total = decimal_or_zero(
-            debt_row.get(
-                "debt_payments_total"
-            )
-        )
-
-        purchases_total = decimal_or_zero(
-            purchases_row.get(
-                "purchases_total"
-            )
-        )
-
-        expenses_total = decimal_or_zero(
-            expenses_row.get(
-                "expenses_total"
-            )
-        )
-
-        total_incoming = (
-            sales_total
-            + debt_total
-        ).quantize(
-            Decimal("0.01")
-        )
-
-        total_outgoing = (
-            purchases_total
-            + expenses_total
-        ).quantize(
-            Decimal("0.01")
-        )
-
-        net_amount = (
-            total_incoming
-            - total_outgoing
-        ).quantize(
-            Decimal("0.01")
-        )
+        def item(name):
+            return {
+                "count": rows[name].get(f"{name}_count", 0),
+                "total": str(amounts[name]),
+            }
 
         results.append({
             "payment_method": {
-                "public_id": str(
-                    method.public_id
-                ),
+                "public_id": str(method.public_id),
                 "name": method.name,
-                "method_type": (
-                    method.method_type
-                ),
+                "method_type": method.method_type,
             },
-            "sales": {
-                "count": sales_row.get(
-                    "sales_count",
-                    0,
-                ),
-                "total": str(sales_total),
-            },
+            "sales": item("sales"),
+            "purchases": item("purchases"),
+            "expenses": item("expenses"),
             "debt_payments": {
-                "count": debt_row.get(
-                    "debt_payments_count",
-                    0,
-                ),
+                "count": rows["received"].get("received_count", 0) + rows["made"].get("made_count", 0),
                 "total": str(debt_total),
             },
-            "purchases": {
-                "count": purchases_row.get(
-                    "purchases_count",
-                    0,
-                ),
-                "total": str(
-                    purchases_total
-                ),
-            },
-            "expenses": {
-                "count": expenses_row.get(
-                    "expenses_count",
-                    0,
-                ),
-                "total": str(
-                    expenses_total
-                ),
-            },
-            "total_incoming": str(
-                total_incoming
-            ),
-            "total_outgoing": str(
-                total_outgoing
-            ),
-            "net_amount": str(net_amount),
+            "debt_payments_received": item("received"),
+            "debt_payments_made": item("made"),
+            "total_incoming": str(incoming),
+            "total_outgoing": str(outgoing),
+            "net_amount": str(incoming - outgoing),
         })
 
-    paid_sales_summary = paid_sales.aggregate(
-        count=Count("id"),
-        total=Sum("total_value"),
-    )
-
-    debt_payments_summary = (
-        debt_payments.aggregate(
-            count=Count("id"),
-            total=Sum("amount"),
-        )
-    )
-
-    purchases_summary = purchases.aggregate(
-        count=Count("id"),
-        total=Sum("total_value"),
-    )
-
-    expenses_summary = expenses.aggregate(
-        count=Count("id"),
-        total=Sum("total_value"),
-    )
-
-    sales_total = decimal_or_zero(
-        paid_sales_summary["total"]
-    )
-
-    debt_total = decimal_or_zero(
-        debt_payments_summary["total"]
-    )
-
-    purchases_total = decimal_or_zero(
-        purchases_summary["total"]
-    )
-
-    expenses_total = decimal_or_zero(
-        expenses_summary["total"]
-    )
-
-    incoming_total = (
-        sales_total
-        + debt_total
-    ).quantize(
-        Decimal("0.01")
-    )
-
-    outgoing_total = (
-        purchases_total
-        + expenses_total
-    ).quantize(
-        Decimal("0.01")
-    )
+    summaries = {
+        name: _summary(queryset, amount_field)
+        for name, (queryset, amount_field) in sources.items()
+    }
+    incoming = (summaries["sales"]["total"] + summaries["received"]["total"]).quantize(Decimal("0.01"))
+    outgoing = (
+        summaries["purchases"]["total"]
+        + summaries["expenses"]["total"]
+        + summaries["made"]["total"]
+    ).quantize(Decimal("0.01"))
 
     return {
-        "business": {
-            "public_id": str(
-                business.public_id
-            ),
-            "name": business.business_name,
-            "currency": business.currency,
-        },
-        "period": {
-            "date_from": date_from.isoformat(),
-            "date_to": date_to.isoformat(),
-        },
+        "business": {"public_id": str(business.public_id), "name": business.business_name, "currency": business.currency},
+        "period": {"date_from": date_from.isoformat(), "date_to": date_to.isoformat()},
         "totals": {
-            "sales": {
-                "count": (
-                    paid_sales_summary["count"]
-                ),
-                "total": str(sales_total),
-            },
+            "sales": _render_summary(summaries["sales"]),
+            "purchases": _render_summary(summaries["purchases"]),
+            "expenses": _render_summary(summaries["expenses"]),
             "debt_payments": {
-                "count": (
-                    debt_payments_summary[
-                        "count"
-                    ]
-                ),
-                "total": str(debt_total),
+                "count": summaries["received"]["count"] + summaries["made"]["count"],
+                "total": str((summaries["received"]["total"] + summaries["made"]["total"]).quantize(Decimal("0.01"))),
             },
-            "purchases": {
-                "count": (
-                    purchases_summary["count"]
-                ),
-                "total": str(
-                    purchases_total
-                ),
-            },
-            "expenses": {
-                "count": (
-                    expenses_summary["count"]
-                ),
-                "total": str(
-                    expenses_total
-                ),
-            },
-            "incoming_total": str(
-                incoming_total
-            ),
-            "outgoing_total": str(
-                outgoing_total
-            ),
-            "net_amount": str(
-                incoming_total
-                - outgoing_total
-            ),
+            "debt_payments_received": _render_summary(summaries["received"]),
+            "debt_payments_made": _render_summary(summaries["made"]),
+            "payments_received": str(incoming),
+            "payments_made": str(outgoing),
+            "incoming_total": str(incoming),
+            "outgoing_total": str(outgoing),
+            "net_amount": str(incoming - outgoing),
         },
         "results": results,
     }
 
-def build_debts_summary(
-    *,
-    business,
-    date_from: date,
-    date_to: date,
-) -> dict:
-    """
-    Calcula:
 
-    - deudas generadas dentro del período;
-    - pagos recibidos dentro del período;
-    - saldo pendiente al final del período;
-    - saldo vencido al final del período.
+def _annotate_paid_until(queryset, date_to):
+    return queryset.annotate(paid_until_end=Coalesce(
+        Sum("payments__amount", filter=Q(payments__payment_date__lte=date_to)),
+        Value(Decimal("0.00")),
+        output_field=MONEY_FIELD,
+    ))
 
-    El pendiente histórico se calcula usando solamente pagos
-    cuya fecha sea menor o igual a date_to.
-    """
-    start_datetime, end_datetime = (
-        get_report_datetime_range(
-            date_from=date_from,
-            date_to=date_to,
-        )
+
+def _debt_direction_summary(queryset, date_to):
+    original = queryset.aggregate(count=Count("id"), total=Sum("total_amount"))
+    paid = DebtPayment.objects.filter(debt__in=queryset, payment_date__lte=date_to).aggregate(total=Sum("amount"))
+    original_total = decimal_or_zero(original["total"])
+    paid_total = decimal_or_zero(paid["total"])
+    settled_count = _annotate_paid_until(queryset, date_to).filter(
+        paid_until_end__gte=F("total_amount")
+    ).count()
+    return {
+        "count": original["count"],
+        "settled_count": settled_count,
+        "pending_count": original["count"] - settled_count,
+        "original_total": original_total,
+        "paid_total": paid_total,
+        "outstanding": max(original_total - paid_total, Decimal("0.00")).quantize(Decimal("0.01")),
+    }
+
+
+def build_debts_summary(*, business, date_from: date, date_to: date) -> dict:
+    start_datetime, end_datetime = get_report_datetime_range(
+        date_from=date_from, date_to=date_to,
     )
-
-    valid_debts = (
-        Debt.objects
-        .filter(
+    valid = exclude_terminal_transactions(
+        Debt.objects.filter(
             transaction__business=business,
-            transaction__created_at__lt=(
-                end_datetime
-            ),
-        )
-        .exclude(
-            transaction__status__name__in=(
-                EXCLUDED_STATUS_NAMES
-            )
-        )
+            transaction__created_at__lt=end_datetime,
+        ),
+        status_lookup="transaction__status__name",
     )
+    generated = valid.filter(transaction__created_at__gte=start_datetime)
+    direction_querysets = {
+        "receivable": valid.filter(transaction__type="sale"),
+        "payable": valid.filter(transaction__type="purchase"),
+        "unclassified": valid.exclude(transaction__type__in=("sale", "purchase")),
+    }
+    direction_summaries = {
+        name: _debt_direction_summary(queryset, date_to)
+        for name, queryset in direction_querysets.items()
+    }
+    period_payments = recognized_debt_payments(DebtPayment.objects.filter(
+        debt__transaction__business=business,
+        payment_date__gte=date_from,
+        payment_date__lte=date_to,
+    ))
+    received = _summary(period_payments.filter(debt__transaction__type="sale"), "amount")
+    made = _summary(period_payments.filter(debt__transaction__type="purchase"), "amount")
 
-    generated_debts = valid_debts.filter(
-        transaction__created_at__gte=(
-            start_datetime
-        )
-    )
-
-    generated_summary = (
-        generated_debts.aggregate(
-            count=Count("id"),
-            total=Sum("total_amount"),
-        )
-    )
-
-    period_payments = (
-        DebtPayment.objects
-        .filter(
-            debt__transaction__business=business,
-            payment_date__gte=date_from,
-            payment_date__lte=date_to,
-        )
-        .exclude(
-            debt__transaction__status__name__in=(
-                EXCLUDED_STATUS_NAMES
-            )
-        )
-    )
-
-    payments_summary = (
-        period_payments.aggregate(
-            count=Count("id"),
-            total=Sum("amount"),
-        )
-    )
-
-    all_debt_total = decimal_or_zero(
-        valid_debts.aggregate(
-            total=Sum("total_amount")
-        )["total"]
-    )
-
-    payments_until_period_end = (
-        DebtPayment.objects
-        .filter(
-            debt__in=valid_debts,
-            payment_date__lte=date_to,
-        )
-        .aggregate(
-            total=Sum("amount")
-        )
-    )
-
-    paid_until_end = decimal_or_zero(
-        payments_until_period_end["total"]
-    )
-
-    outstanding_at_end = max(
-        all_debt_total - paid_until_end,
+    original_total = sum(
+        (item["original_total"] for item in direction_summaries.values()),
         Decimal("0.00"),
-    ).quantize(
-        Decimal("0.01")
-    )
-
-    overdue_debts = valid_debts.filter(
-        due_date__lt=date_to,
-    )
-
-    overdue_total = decimal_or_zero(
-        overdue_debts.aggregate(
-            total=Sum("total_amount")
-        )["total"]
-    )
-
-    overdue_payments = decimal_or_zero(
-        DebtPayment.objects
-        .filter(
-            debt__in=overdue_debts,
-            payment_date__lte=date_to,
-        )
-        .aggregate(
-            total=Sum("amount")
-        )["total"]
-    )
-
-    overdue_outstanding = max(
-        overdue_total - overdue_payments,
+    ).quantize(Decimal("0.01"))
+    paid_total = sum(
+        (item["paid_total"] for item in direction_summaries.values()),
         Decimal("0.00"),
-    ).quantize(
-        Decimal("0.01")
-    )
-
-    generated_results = (
-        generated_debts
-        .select_related(
-            "transaction",
-            "transaction__customer",
-            "transaction__employee",
-        )
-        .order_by(
-            "due_date",
-            "created_at",
-        )
-    )
+    ).quantize(Decimal("0.01"))
+    outstanding = max(original_total - paid_total, Decimal("0.00")).quantize(Decimal("0.01"))
+    overdue = _debt_direction_summary(valid.filter(due_date__lt=date_to), date_to)
+    generated_summary = generated.aggregate(count=Count("id"), total=Sum("total_amount"))
 
     results = []
+    generated_rows = _annotate_paid_until(generated, date_to).select_related(
+        "transaction", "transaction__customer", "transaction__supplier", "transaction__employee",
+    ).order_by("due_date", "created_at")
+    for debt in generated_rows:
+        transaction = debt.transaction
+        paid = decimal_or_zero(debt.paid_until_end)
+        pending = max(debt.total_amount - paid, Decimal("0.00")).quantize(Decimal("0.01"))
+        direction = {"sale": "receivable", "purchase": "payable"}.get(transaction.type, "unclassified")
 
-    for debt in generated_results:
-        paid_to_period_end = (
-            debt.payments
-            .filter(
-                payment_date__lte=date_to
-            )
-            .aggregate(
-                total=Sum("amount")
-            )["total"]
-        )
-
-        paid_amount = decimal_or_zero(
-            paid_to_period_end
-        )
-
-        pending_amount = max(
-            debt.total_amount - paid_amount,
-            Decimal("0.00"),
-        ).quantize(
-            Decimal("0.01")
-        )
-
-        customer = (
-            debt.transaction.customer
-        )
-
-        employee = (
-            debt.transaction.employee
-        )
+        def party(obj, name_field):
+            if obj is None:
+                return None
+            name = getattr(obj, name_field)
+            return {"public_id": str(obj.public_id), "name": name, name_field: name}
 
         results.append({
-            "debt": {
-                "public_id": str(
-                    debt.public_id
-                ),
-                "transaction_public_id": str(
-                    debt.transaction.public_id
-                ),
+            "debt": {"public_id": str(debt.public_id), "transaction_public_id": str(transaction.public_id)},
+            "transaction": {
+                "public_id": str(transaction.public_id),
+                "type": transaction.type,
             },
-            "customer": (
-                {
-                    "public_id": str(
-                        customer.public_id
-                    ),
-                    "full_name": (
-                        customer.full_name
-                    ),
-                }
-                if customer is not None
-                else None
-            ),
-            "employee": (
-                {
-                    "public_id": str(
-                        employee.public_id
-                    ),
-                    "full_name": (
-                        employee.full_name
-                    ),
-                }
-                if employee is not None
-                else None
-            ),
-            "total_amount": str(
-                decimal_or_zero(
-                    debt.total_amount
-                )
-            ),
-            "paid_until_period_end": str(
-                paid_amount
-            ),
-            "pending_at_period_end": str(
-                pending_amount
-            ),
-            "due_date": (
-                debt.due_date.isoformat()
-            ),
-            "was_overdue_at_period_end": (
-                debt.due_date < date_to
-                and pending_amount > 0
-            ),
+            "direction": direction,
+            "customer": party(transaction.customer, "full_name"),
+            "supplier": party(transaction.supplier, "name"),
+            "employee": party(transaction.employee, "full_name"),
+            "total_amount": str(decimal_or_zero(debt.total_amount)),
+            "total": str(decimal_or_zero(debt.total_amount)),
+            "paid_until_period_end": str(paid),
+            "paid": str(paid),
+            "pending_at_period_end": str(pending),
+            "outstanding": str(pending),
+            "is_settled_at_period_end": pending == 0,
+            "is_settled": pending == 0,
+            "due_date": debt.due_date.isoformat(),
+            "was_overdue_at_period_end": debt.due_date < date_to and pending > 0,
         })
 
+    def render_direction(summary):
+        return {
+            "count": summary["count"],
+            "settled_count": summary["settled_count"],
+            "pending_count": summary["pending_count"],
+            "original_total": str(summary["original_total"]),
+            "paid_total": str(summary["paid_total"]),
+            "outstanding": str(summary["outstanding"]),
+        }
+
     return {
-        "business": {
-            "public_id": str(
-                business.public_id
-            ),
-            "name": business.business_name,
-            "currency": business.currency,
-        },
-        "period": {
-            "date_from": date_from.isoformat(),
-            "date_to": date_to.isoformat(),
-        },
-        "generated": {
-            "count": (
-                generated_summary["count"]
-            ),
-            "total": str(
-                decimal_or_zero(
-                    generated_summary["total"]
-                )
-            ),
-        },
-        "payments_received": {
-            "count": payments_summary["count"],
-            "total": str(
-                decimal_or_zero(
-                    payments_summary["total"]
-                )
-            ),
-        },
+        "business": {"public_id": str(business.public_id), "name": business.business_name, "currency": business.currency},
+        "period": {"date_from": date_from.isoformat(), "date_to": date_to.isoformat()},
+        "generated": {"count": generated_summary["count"], "total": str(decimal_or_zero(generated_summary["total"]))},
+        "payments_received": _render_summary(received),
+        "payments_made": _render_summary(made),
+        "accounts_receivable": render_direction(direction_summaries["receivable"]),
+        "accounts_payable": render_direction(direction_summaries["payable"]),
+        "unclassified": render_direction(direction_summaries["unclassified"]),
         "portfolio_at_period_end": {
-            "original_debt_total": str(
-                all_debt_total
-            ),
-            "paid_until_period_end": str(
-                paid_until_end
-            ),
-            "outstanding": str(
-                outstanding_at_end
-            ),
-            "overdue_outstanding": str(
-                overdue_outstanding
-            ),
+            "original_debt_total": str(original_total),
+            "paid_until_period_end": str(paid_total),
+            "outstanding": str(outstanding),
+            "overdue_outstanding": str(overdue["outstanding"]),
         },
         "results": results,
     }

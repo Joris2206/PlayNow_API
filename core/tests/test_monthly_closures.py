@@ -212,6 +212,16 @@ class MonthlyClosureTests(
                     dict,
                 )
 
+                self.assertIn(
+                    "payments",
+                    closure.summary,
+                )
+
+                self.assertIn(
+                    "outstanding_receivables",
+                    closure.summary["debts"],
+                )
+
     def test_operational_roles_cannot_create_monthly_closure(
         self,
     ):

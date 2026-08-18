@@ -22,6 +22,11 @@ from core.services.customer_supplier_reports import build_customers_summary, bui
 from core.services.dashboard import build_dashboard_overview
 from core.services.inventory_report import build_inventory_summary
 from core.services.inventory import record_stock_movement
+from core.services.financial_flows import (
+    direct_payment_transactions,
+    exclude_terminal_transactions,
+    recognized_debt_payments,
+)
 from core.services.monthly_summary import build_monthly_summary
 from core.services.payment_debt_reports import build_debts_summary, build_payments_summary
 from .filters import (
@@ -53,11 +58,14 @@ from .serializers import (
     BusinessMembershipSerializer,
     BusinessMembershipUpdateSerializer,
     CashMovementSerializer,
+    CashRegisterSummaryResponseSerializer,
     CashRegisterCloseSerializer,
     CashRegisterOpenSerializer,
     CashRegisterSerializer,
     CustomerSummaryQuerySerializer,
     DashboardOverviewQuerySerializer,
+    DashboardOverviewResponseSerializer,
+    DebtSummaryResponseSerializer,
     DebtSummaryQuerySerializer,
     EmployeeAccessCreateSerializer,
     EmployeeSelectionSerializer,
@@ -67,7 +75,9 @@ from .serializers import (
     MonthlyClosureReopenSerializer,
     MonthlyClosureSerializer,
     MonthlySummaryQuerySerializer,
+    MonthlySummaryResponseSerializer,
     PaymentSummaryQuerySerializer,
+    PaymentSummaryResponseSerializer,
     SupplierSummaryQuerySerializer,
     CurrentUserSerializer,
     PublicProductCategorySerializer,
@@ -546,24 +556,17 @@ def calculate_cash_register_summary(
 ):
     until = until or django_timezone.now()
 
-    excluded_statuses = [
-        "Eliminado",
-        "Anulado",
-        "Cancelado",
-        "Void",
-        "Deleted",
-    ]
-
-    base_transactions = (
+    base_transactions = exclude_terminal_transactions(
         Transaction.objects
         .filter(
             business=cash_register.business,
             created_at__gte=cash_register.open_time,
             created_at__lte=until,
         )
-        .exclude(
-            status__name__in=excluded_statuses
-        )
+    )
+
+    direct_transactions = direct_payment_transactions(
+        base_transactions
     )
 
     def transaction_total(
@@ -571,10 +574,9 @@ def calculate_cash_register_summary(
         method_type,
     ):
         result = (
-            base_transactions
+            direct_transactions
             .filter(
                 type=transaction_type,
-                payment_status="paid",
                 payment_method__method_type=method_type,
             )
             .aggregate(
@@ -617,7 +619,7 @@ def calculate_cash_register_summary(
         PaymentMethod.TYPE_CASH,
     )
 
-    cash_debt_payments = (
+    session_debt_payments = recognized_debt_payments(
         DebtPayment.objects
         .filter(
             debt__transaction__business=(
@@ -631,11 +633,24 @@ def calculate_cash_register_summary(
             ),
             created_at__lte=until,
         )
-        .aggregate(
-            total=Sum("amount")
+    )
+
+    def cash_debt_payment_total(transaction_type):
+        return (
+            session_debt_payments
+            .filter(
+                debt__transaction__type=transaction_type,
+            )
+            .aggregate(total=Sum("amount"))
+            .get("total")
+            or Decimal("0.00")
         )
-        .get("total")
-        or Decimal("0.00")
+
+    cash_debt_payments_received = (
+        cash_debt_payment_total("sale")
+    )
+    cash_debt_payments_made = (
+        cash_debt_payment_total("purchase")
     )
 
     movements = (
@@ -702,10 +717,11 @@ def calculate_cash_register_summary(
     expected_closing_balance = (
         cash_register.opening_balance
         + cash_sales
-        + cash_debt_payments
+        + cash_debt_payments_received
         + total_income_movements
         - cash_purchases
         - cash_expenses
+        - cash_debt_payments_made
         - total_outgoing_movements
     ).quantize(
         Decimal("0.01")
@@ -734,7 +750,23 @@ def calculate_cash_register_summary(
         "cash_purchases": cash_purchases,
         "cash_expenses": cash_expenses,
         "cash_debt_payments": (
-            cash_debt_payments
+            cash_debt_payments_received
+            + cash_debt_payments_made
+        ),
+        "cash_debt_payments_received": (
+            cash_debt_payments_received
+        ),
+        "cash_debt_payments_made": (
+            cash_debt_payments_made
+        ),
+        "automatic_cash_inflows": (
+            cash_sales
+            + cash_debt_payments_received
+        ),
+        "automatic_cash_outflows": (
+            cash_purchases
+            + cash_expenses
+            + cash_debt_payments_made
         ),
         "movements": {
             "deposits": deposits,
@@ -4524,6 +4556,7 @@ class CashRegisterViewSet(
         summary="Vista previa del cierre",
         responses={
             200: OpenApiResponse(
+                response=CashRegisterSummaryResponseSerializer,
                 description=(
                     "Resumen calculado de la caja."
                 )
@@ -4910,14 +4943,15 @@ class MonthlySummaryView(
         tags=["Reports"],
         summary="Resumen mensual del negocio",
         description=(
-            "Calcula el resumen operativo y financiero "
-            "dinámico de un negocio durante un mes."
+            "Separa volumen comercial, dinero recibido/pagado "
+            "y saldos por cobrar/pagar durante un mes."
         ),
         parameters=[
             MonthlySummaryQuerySerializer,
         ],
         responses={
             200: OpenApiResponse(
+                response=MonthlySummaryResponseSerializer,
                 description=(
                     "Resumen mensual calculado."
                 )
@@ -5610,14 +5644,16 @@ class PaymentSummaryView(
         tags=["Reports"],
         summary="Resumen de pagos",
         description=(
-            "Resume entradas y salidas agrupadas "
-            "por método de pago."
+            "Separa pagos recibidos y realizados por método. "
+            "Las transacciones con deuda histórica se reconocen "
+            "exclusivamente mediante sus pagos de deuda."
         ),
         parameters=[
             PaymentSummaryQuerySerializer,
         ],
         responses={
             200: OpenApiResponse(
+                response=PaymentSummaryResponseSerializer,
                 description=(
                     "Resumen dinámico de pagos."
                 )
@@ -5701,14 +5737,15 @@ class DebtSummaryView(
         tags=["Reports"],
         summary="Resumen de deudas",
         description=(
-            "Calcula deudas generadas, pagos y "
-            "cartera pendiente dentro del período."
+            "Separa cuentas por cobrar de ventas, cuentas por "
+            "pagar de compras y deudas históricas no clasificadas."
         ),
         parameters=[
             DebtSummaryQuerySerializer,
         ],
         responses={
             200: OpenApiResponse(
+                response=DebtSummaryResponseSerializer,
                 description=(
                     "Resumen dinámico de deudas."
                 )
@@ -5864,15 +5901,16 @@ class DashboardOverviewView(
         tags=["Dashboard"],
         summary="Vista general del negocio",
         description=(
-            "Devuelve indicadores resumidos de "
-            "ventas, compras, gastos, deudas, "
-            "caja, comisiones e inventario."
+            "Devuelve volumen comercial, pagos recibidos y hechos, "
+            "cuentas por cobrar/pagar, caja, comisiones e inventario. "
+            "outstanding_debt se conserva como agregado bruto legado."
         ),
         parameters=[
             DashboardOverviewQuerySerializer,
         ],
         responses={
             200: OpenApiResponse(
+                response=DashboardOverviewResponseSerializer,
                 description=(
                     "Indicadores generales del "
                     "negocio."
