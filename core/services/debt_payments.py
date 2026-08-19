@@ -11,15 +11,8 @@ from core.models import (
     Transaction,
 )
 from core.services.financial_flows import (
-    TERMINAL_TRANSACTION_STATUS_NAMES as TERMINAL_STATUS_DISPLAY_NAMES,
     is_terminal_transaction_status,
 )
-
-
-TERMINAL_TRANSACTION_STATUS_NAMES = {
-    name.casefold()
-    for name in TERMINAL_STATUS_DISPLAY_NAMES
-}
 
 
 class DebtPaymentConflict(APIException):
@@ -83,6 +76,7 @@ def register_debt_payment(
     amount,
     payment_date,
     payment_method_id,
+    actor,
     submitted_transaction_id=None,
     observed_remaining_amount=None,
 ):
@@ -191,6 +185,7 @@ def register_debt_payment(
         payment_date=payment_date,
         payment_method=payment_method,
         transaction=transaction,
+        created_by=actor,
     )
 
     debt.paid_amount = new_paid_amount

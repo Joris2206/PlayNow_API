@@ -1057,8 +1057,8 @@ class Debt(models.Model):
     class Meta:
         constraints = [
             models.CheckConstraint(
-                condition=Q(total_amount__gte=0),
-                name="debt_total_amount_gte_0",
+                condition=Q(total_amount__gt=0),
+                name="debt_total_amount_gt_0",
             ),
             models.CheckConstraint(
                 condition=Q(paid_amount__gte=0),
@@ -1076,6 +1076,19 @@ class Debt(models.Model):
                 condition=Q(term_months__gte=0),
                 name="debt_term_months_gte_0",
             ),
+            models.CheckConstraint(
+                condition=(
+                    Q(
+                        is_settled=True,
+                        paid_amount=models.F("total_amount"),
+                    )
+                    | Q(
+                        is_settled=False,
+                        paid_amount__lt=models.F("total_amount"),
+                    )
+                ),
+                name="debt_settlement_matches_paid_amount",
+            ),
         ]
 
     def __str__(self):
@@ -1091,6 +1104,13 @@ class DebtPayment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     payment_method = models.ForeignKey(PaymentMethod, on_delete=models.PROTECT, related_name='debt_payments')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_debt_payments",
+    )
 
     class Meta:
         constraints = [

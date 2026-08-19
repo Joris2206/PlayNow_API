@@ -10,9 +10,12 @@ from drf_spectacular.utils import (
 from rest_framework import serializers
 
 from core.services.debt_payments import (
-    TERMINAL_TRANSACTION_STATUS_NAMES,
     get_locked_active_payment_method,
     register_debt_payment,
+)
+from core.services.financial_flows import (
+    exclude_terminal_transactions,
+    is_terminal_transaction_status,
 )
 from core.utils import calculate_employee_advance_summary
 from .models import (
@@ -847,10 +850,6 @@ class TransactionDetailSerializer(
 class TransactionSerializer(
     serializers.ModelSerializer
 ):
-    TERMINAL_STATUS_NAMES = (
-        TERMINAL_TRANSACTION_STATUS_NAMES
-    )
-
     business_public_id = secure_public_id_field(
         Business,
         source="business",
@@ -1043,8 +1042,9 @@ class TransactionSerializer(
     def validate(self, attrs):
         if (
             self.instance is not None
-            and self.instance.status.name.casefold()
-            in self.TERMINAL_STATUS_NAMES
+            and is_terminal_transaction_status(
+                self.instance.status
+            )
         ):
             requested_status = attrs.get("status")
 
@@ -1838,6 +1838,7 @@ class TransactionSerializer(
             amount=initial_paid_amount,
             payment_date=timezone.localdate(),
             payment_method_id=payment_method.pk,
+            actor=transaction.created_by,
             submitted_transaction_id=transaction.pk,
             observed_remaining_amount=transaction.total_value,
         )
@@ -1970,10 +1971,21 @@ class DebtPaymentSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True,
     )
+    created_by_public_id = serializers.SlugRelatedField(
+        source="created_by",
+        slug_field="public_id",
+        read_only=True,
+        allow_null=True,
+    )
+    created_by_name = serializers.CharField(
+        source="created_by.full_name",
+        read_only=True,
+        allow_null=True,
+    )
     class Meta:
         model = DebtPayment
-        fields = ("public_id", "business_public_id", "debt_public_id", "amount", "payment_date", "payment_method_public_id", "payment_method_name", "customer_name", "supplier_name", "transaction_public_id", "created_at", "updated_at")
-        read_only_fields = ("public_id", "created_at", "updated_at")
+        fields = ("public_id", "business_public_id", "debt_public_id", "amount", "payment_date", "payment_method_public_id", "payment_method_name", "customer_name", "supplier_name", "transaction_public_id", "created_by_public_id", "created_by_name", "created_at", "updated_at")
+        read_only_fields = ("public_id", "created_by_public_id", "created_by_name", "created_at", "updated_at")
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -2007,6 +2019,22 @@ class DebtPaymentSerializer(serializers.ModelSerializer):
             "transaction_public_id"
         ].queryset = transaction_queryset
 
+    def validate(self, attrs):
+        forbidden_actor_fields = {
+            field_name
+            for field_name in (
+                "created_by_public_id",
+                "created_by_name",
+            )
+            if field_name in self.initial_data
+        }
+        if forbidden_actor_fields:
+            raise serializers.ValidationError({
+                field_name: "Este campo es de solo lectura."
+                for field_name in sorted(forbidden_actor_fields)
+            })
+        return attrs
+
     def create(self, validated_data):
         debt = validated_data["debt"]
         payment_method = validated_data[
@@ -2023,6 +2051,7 @@ class DebtPaymentSerializer(serializers.ModelSerializer):
                 "payment_date"
             ],
             payment_method_id=payment_method.pk,
+            actor=self.context["request"].user,
             submitted_transaction_id=(
                 submitted_transaction.pk
                 if submitted_transaction is not None
@@ -2682,14 +2711,6 @@ class CommissionSettlementCreateSerializer(
             "commission_plan"
         ]
 
-        excluded_status_names = [
-            "Eliminado",
-            "Anulado",
-            "Cancelado",
-            "Void",
-            "Deleted",
-        ]
-
         sales = (
             Transaction.objects
             .filter(
@@ -2703,12 +2724,8 @@ class CommissionSettlementCreateSerializer(
                     period_end
                 ),
             )
-            .exclude(
-                status__name__in=(
-                    excluded_status_names
-                )
-            )
         )
+        sales = exclude_terminal_transactions(sales)
 
         summary = sales.aggregate(
             sales_total=Sum("total_value"),

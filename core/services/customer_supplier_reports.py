@@ -10,15 +10,10 @@ from django.db.models import (
 from django.utils import timezone as django_timezone
 
 from core.models import Transaction
+from core.services.financial_flows import (
+    exclude_terminal_transactions,
+)
 
-
-EXCLUDED_STATUS_NAMES = [
-    "Eliminado",
-    "Anulado",
-    "Cancelado",
-    "Void",
-    "Deleted",
-]
 
 
 def decimal_or_zero(value) -> Decimal:
@@ -88,9 +83,9 @@ def build_customers_summary(
             created_at__gte=start_datetime,
             created_at__lt=end_datetime,
         )
-        .exclude(
-            status__name__in=EXCLUDED_STATUS_NAMES
-        )
+    )
+    transactions = exclude_terminal_transactions(
+        transactions
     )
 
     if customer is not None:
@@ -221,9 +216,9 @@ def build_suppliers_summary(
             created_at__gte=start_datetime,
             created_at__lt=end_datetime,
         )
-        .exclude(
-            status__name__in=EXCLUDED_STATUS_NAMES
-        )
+    )
+    transactions = exclude_terminal_transactions(
+        transactions
     )
 
     if supplier is not None:

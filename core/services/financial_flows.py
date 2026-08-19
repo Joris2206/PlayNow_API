@@ -1,4 +1,4 @@
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 
 from core.models import PaymentMethod
 
@@ -14,16 +14,34 @@ TERMINAL_TRANSACTION_STATUS_NAMES = (
     "Deleted",
 )
 
+_NORMALIZED_TERMINAL_TRANSACTION_STATUS_NAMES = frozenset(
+    name.casefold()
+    for name in TERMINAL_TRANSACTION_STATUS_NAMES
+)
+
+
+def is_terminal_transaction_status_name(name):
+    return (
+        isinstance(name, str)
+        and name.casefold()
+        in _NORMALIZED_TERMINAL_TRANSACTION_STATUS_NAMES
+    )
+
 
 def is_terminal_transaction_status(status_or_name):
     name = getattr(status_or_name, "name", status_or_name)
-    return (
-        isinstance(name, str)
-        and name.casefold() in {
-            item.casefold()
-            for item in TERMINAL_TRANSACTION_STATUS_NAMES
-        }
-    )
+    return is_terminal_transaction_status_name(name)
+
+
+def build_terminal_transaction_status_q(
+    status_lookup="status__name",
+):
+    condition = Q()
+    for name in TERMINAL_TRANSACTION_STATUS_NAMES:
+        condition |= Q(**{
+            f"{status_lookup}__iexact": name,
+        })
+    return condition
 
 
 def transaction_flow_direction(transaction_or_type):
@@ -59,11 +77,11 @@ def exclude_terminal_transactions(
     *,
     status_lookup="status__name",
 ):
-    return queryset.exclude(**{
-        f"{status_lookup}__in": (
-            TERMINAL_TRANSACTION_STATUS_NAMES
-        ),
-    })
+    return queryset.exclude(
+        build_terminal_transaction_status_q(
+            status_lookup,
+        )
+    )
 
 
 def direct_payment_transactions(queryset: QuerySet):

@@ -352,6 +352,7 @@ class DebtPaymentRegistrationTests(
                 amount=Decimal("10.00"),
                 payment_date=timezone.localdate(),
                 payment_method_id=self.method.pk,
+                actor=self.user_a,
                 observed_remaining_amount=(
                     Decimal("100.00")
                 ),
@@ -726,6 +727,7 @@ class DebtPaymentRegistrationTests(
                     amount=Decimal("25.00"),
                     payment_date=timezone.localdate(),
                     payment_method_id=self.method.pk,
+                    actor=self.user_a,
                     observed_remaining_amount=(
                         Decimal("100.00")
                     ),

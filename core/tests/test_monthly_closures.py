@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+from io import StringIO
 
+from django.core.management import call_command
 from django.utils import timezone as django_timezone
 from rest_framework import status
 
@@ -9,6 +11,10 @@ from core.models import (
     CashRegister,
     MonthlyClosure,
     PaymentMethod,
+)
+from core.services.financial_integrity import (
+    diagnose_financial_integrity,
+    is_legacy_monthly_closure_snapshot,
 )
 from core.tests.base import BusinessIsolationTestCase
 from core.tests.factories import (
@@ -221,6 +227,35 @@ class MonthlyClosureTests(
                     "outstanding_receivables",
                     closure.summary["debts"],
                 )
+
+    def test_new_closure_is_current_and_passes_strict_diagnostic(self):
+        response = self._create_closure()
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_201_CREATED,
+            msg=response.data,
+        )
+        closure = MonthlyClosure.objects.get(
+            public_id=response.data["public_id"]
+        )
+        self.assertFalse(
+            is_legacy_monthly_closure_snapshot(closure.summary)
+        )
+        codes = {
+            finding.code
+            for finding in diagnose_financial_integrity(
+                business=self.business_a
+            )
+        }
+        self.assertNotIn("historical_monthly_closure_review", codes)
+        output = StringIO()
+        call_command(
+            "diagnose_financial_integrity",
+            strict=True,
+            business_public_id=str(self.business_a.public_id),
+            stdout=output,
+        )
+        self.assertIn("INFO clean count=0", output.getvalue())
 
     def test_operational_roles_cannot_create_monthly_closure(
         self,

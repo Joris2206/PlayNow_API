@@ -3177,6 +3177,7 @@ class DebtPaymentViewSet(BusinessScopedViewSet):
         "debt__transaction__supplier",
         "payment_method",
         "transaction",
+        "created_by",
     ).all()
     serializer_class = DebtPaymentSerializer
 
@@ -3724,14 +3725,6 @@ class EmployeeSalesReportView(
             business=business,
         )
 
-        excluded_statuses = [
-            "Eliminado",
-            "Anulado",
-            "Cancelado",
-            "Void",
-            "Deleted",
-        ]
-
         sales = (
             Transaction.objects
             .select_related(
@@ -3746,11 +3739,9 @@ class EmployeeSalesReportView(
                 created_at__date__gte=date_from,
                 created_at__date__lte=date_to,
             )
-            .exclude(
-                status__name__in=excluded_statuses
-            )
             .order_by("-created_at")
         )
+        sales = exclude_terminal_transactions(sales)
 
         summary = sales.aggregate(
             sales_count=Count("id"),
@@ -3955,14 +3946,6 @@ class EmployeeCommissionPreviewView(
                 )
             })
 
-        excluded_statuses = [
-            "Eliminado",
-            "Anulado",
-            "Cancelado",
-            "Void",
-            "Deleted",
-        ]
-
         sales = (
             Transaction.objects
             .filter(
@@ -3974,10 +3957,8 @@ class EmployeeCommissionPreviewView(
                     date_to,
                 ),
             )
-            .exclude(
-                status__name__in=excluded_statuses
-            )
         )
+        sales = exclude_terminal_transactions(sales)
 
         summary = sales.aggregate(
             sales_count=Count("id"),

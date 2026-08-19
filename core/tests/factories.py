@@ -275,12 +275,21 @@ def create_debt(*, transaction, total_amount=None, paid_amount=Decimal("0.00")):
         is_settled=paid_amount >= total,
     )
 
-def create_debt_payment(*, debt, payment_method, amount=Decimal("25.00")):
+def create_debt_payment(
+    *,
+    debt,
+    payment_method,
+    amount=Decimal("25.00"),
+    created_by=None,
+    transaction=None,
+):
     return DebtPayment.objects.create(
         debt=debt,
         amount=amount,
         payment_date=date.today(),
         payment_method=payment_method,
+        created_by=created_by,
+        transaction=transaction,
     )
 
 def create_commission_plan(

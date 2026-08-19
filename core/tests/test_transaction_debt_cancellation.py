@@ -200,7 +200,10 @@ class TransactionDebtCancellationTests(BusinessIsolationTestCase):
                 if evidence == "paid_amount":
                     Debt.objects.filter(pk=debt.pk).update(paid_amount=Decimal("1.00"))
                 elif evidence == "is_settled":
-                    Debt.objects.filter(pk=debt.pk).update(is_settled=True)
+                    Debt.objects.filter(pk=debt.pk).update(
+                        paid_amount=debt.total_amount,
+                        is_settled=True,
+                    )
                 else:
                     DebtPayment.objects.create(
                         debt=debt,
@@ -523,6 +526,7 @@ class ConcurrentTransactionDebtCancellationTests(TransactionTestCase):
                         amount=Decimal("25.00"),
                         payment_date=timezone.localdate(),
                         payment_method_id=self.method.pk,
+                        actor=type(self.owner).objects.get(pk=self.owner.pk),
                         observed_remaining_amount=Decimal("100.00"),
                     )
                     if lock_held is not None:
