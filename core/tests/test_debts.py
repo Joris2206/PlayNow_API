@@ -1,8 +1,13 @@
+from datetime import date
 from decimal import Decimal
 
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from drf_spectacular.generators import SchemaGenerator
 from rest_framework import status
 
+from core.models import Transaction
+from core.services.debt_payments import register_debt_payment
 from core.serializers import (
     DebtPaymentSerializer,
     DebtSerializer,
@@ -30,25 +35,75 @@ class DebtBusinessIsolationTests(BusinessIsolationTestCase):
             business=cls.business_a,
             created_by=cls.user_a,
             status=cls.active_status,
+            customer=create_customer(
+                business=cls.business_a,
+                status=cls.active_status,
+                full_name="Cliente A",
+            ),
             is_debt=True,
             total_value=Decimal("100.00"),
+        )
+        cls.customer_b = create_customer(
+            business=cls.business_b,
+            status=cls.active_status,
+            full_name="Cliente B",
+        )
+        cls.supplier_b = create_supplier(
+            business=cls.business_b,
+            status=cls.active_status,
+            name="Proveedor B",
         )
         cls.tx_b = create_transaction(
             business=cls.business_b,
             created_by=cls.user_b,
             status=cls.active_status,
+            customer=cls.customer_b,
             is_debt=True,
             total_value=Decimal("200.00"),
         )
+        cls.supplier_tx_b = create_transaction(
+            business=cls.business_b,
+            created_by=cls.user_b,
+            status=cls.active_status,
+            supplier=cls.supplier_b,
+            transaction_type="purchase",
+            is_debt=True,
+            total_value=Decimal("300.00"),
+        )
         cls.debt_a = create_debt(transaction=cls.tx_a)
         cls.debt_b = create_debt(transaction=cls.tx_b)
+        cls.supplier_debt_b = create_debt(
+            transaction=cls.supplier_tx_b
+        )
 
     def test_user_only_lists_own_debts(self):
-        self.assert_list_contains_only_owned_object(
-            endpoint="/api/debts/",
-            owned_object=self.debt_a,
-            foreign_object=self.debt_b,
+        response = self.client.get(
+            "/api/debts/",
+            {
+                "business_public_id": str(
+                    self.business_a.public_id
+                ),
+            },
         )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = get_response_results(response)
+        self.assertEqual(
+            {item["public_id"] for item in results},
+            {str(self.debt_a.public_id)},
+        )
+        self.assertEqual(
+            str(results[0]["customer_public_id"]),
+            str(self.tx_a.customer.public_id),
+        )
+        self.assertNotEqual(
+            str(results[0]["customer_public_id"]),
+            str(self.customer_b.public_id),
+        )
+        self.assertIsNone(results[0]["supplier_public_id"])
+        serialized_results = str(results)
+        self.assertNotIn(str(self.customer_b.public_id), serialized_results)
+        self.assertNotIn(str(self.supplier_b.public_id), serialized_results)
 
     def test_user_cannot_retrieve_foreign_debt(self):
         self.assert_cannot_retrieve_foreign_object(
@@ -175,6 +230,10 @@ class DebtRepresentationAndFilterTests(
             status=cls.active_status,
             name="Proveedor financiero",
         )
+        cls.payment_method = create_payment_method(
+            business=cls.business_a,
+            status=cls.active_status,
+        )
 
         cls.sale_tx = create_transaction(
             business=cls.business_a,
@@ -202,8 +261,16 @@ class DebtRepresentationAndFilterTests(
         cls.settled_sale_debt = create_debt(
             transaction=cls.settled_sale_tx,
             total_amount=Decimal("80.00"),
-            paid_amount=Decimal("80.00"),
         )
+        register_debt_payment(
+            debt_id=cls.settled_sale_debt.pk,
+            amount=Decimal("80.00"),
+            payment_date=date.today(),
+            payment_method_id=cls.payment_method.pk,
+            actor=cls.user_a,
+        )
+        cls.settled_sale_debt.refresh_from_db()
+        cls.settled_sale_tx.refresh_from_db()
 
         cls.purchase_tx = create_transaction(
             business=cls.business_a,
@@ -217,8 +284,16 @@ class DebtRepresentationAndFilterTests(
         cls.purchase_debt = create_debt(
             transaction=cls.purchase_tx,
             total_amount=Decimal("200.00"),
-            paid_amount=Decimal("50.00"),
         )
+        register_debt_payment(
+            debt_id=cls.purchase_debt.pk,
+            amount=Decimal("50.00"),
+            payment_date=date.today(),
+            payment_method_id=cls.payment_method.pk,
+            actor=cls.user_a,
+        )
+        cls.purchase_debt.refresh_from_db()
+        cls.purchase_tx.refresh_from_db()
 
         cls.expense_tx = create_transaction(
             business=cls.business_a,
@@ -294,6 +369,28 @@ class DebtRepresentationAndFilterTests(
             ],
             "payable",
         )
+        sale = debts[str(self.sale_debt.public_id)]
+        purchase = debts[str(self.purchase_debt.public_id)]
+        settled = debts[str(self.settled_sale_debt.public_id)]
+
+        self.assertEqual(
+            str(sale["customer_public_id"]),
+            str(self.customer.public_id),
+        )
+        self.assertIsNone(sale["supplier_public_id"])
+        self.assertEqual(
+            str(purchase["supplier_public_id"]),
+            str(self.supplier.public_id),
+        )
+        self.assertIsNone(purchase["customer_public_id"])
+        self.assertEqual(
+            sale["transaction_status_name"],
+            self.active_status.name,
+        )
+        self.assertEqual(sale["payment_status"], "pending")
+        self.assertEqual(purchase["payment_status"], "partial")
+        self.assertEqual(settled["payment_status"], "paid")
+        self.assertTrue(settled["is_settled"])
         self.assertIsNone(
             debts[str(self.expense_debt.public_id)][
                 "direction"
@@ -345,6 +442,21 @@ class DebtRepresentationAndFilterTests(
             "payable",
         )
         self.assertEqual(
+            str(retrieve_response.data["supplier_public_id"]),
+            str(self.supplier.public_id),
+        )
+        self.assertIsNone(
+            retrieve_response.data["customer_public_id"]
+        )
+        self.assertEqual(
+            retrieve_response.data["transaction_status_name"],
+            self.active_status.name,
+        )
+        self.assertEqual(
+            retrieve_response.data["payment_status"],
+            "partial",
+        )
+        self.assertEqual(
             Decimal(
                 retrieve_response.data[
                     "outstanding_amount"
@@ -353,17 +465,54 @@ class DebtRepresentationAndFilterTests(
             Decimal("150.00"),
         )
 
+        sale_retrieve_response = self.client.get(
+            "/api/debts/"
+            f"{self.sale_debt.public_id}/"
+        )
+        self.assertEqual(
+            sale_retrieve_response.status_code,
+            status.HTTP_200_OK,
+        )
+        self.assertEqual(
+            str(sale_retrieve_response.data["customer_public_id"]),
+            str(self.customer.public_id),
+        )
+        self.assertIsNone(
+            sale_retrieve_response.data["supplier_public_id"]
+        )
+        self.assertEqual(
+            sale_retrieve_response.data["transaction_status_name"],
+            self.active_status.name,
+        )
+        self.assertEqual(
+            sale_retrieve_response.data["payment_status"],
+            "pending",
+        )
+
     def test_derived_fields_are_read_only(self):
         fields = DebtSerializer().fields
 
         for field_name in (
             "business_public_id",
+            "customer_public_id",
+            "supplier_public_id",
+            "transaction_status_name",
+            "payment_status",
             "direction",
             "outstanding_amount",
         ):
             self.assertTrue(
                 fields[field_name].read_only
             )
+
+        self.assertTrue(fields["customer_public_id"].allow_null)
+        self.assertTrue(fields["supplier_public_id"].allow_null)
+        self.assertFalse(fields["transaction_status_name"].allow_null)
+        self.assertFalse(fields["payment_status"].allow_null)
+        self.assertEqual(
+            set(fields["payment_status"].choices),
+            {value for value, _ in Transaction.PAYMENT_STATUSES},
+        )
 
         payment_fields = (
             DebtPaymentSerializer().fields
@@ -373,6 +522,43 @@ class DebtRepresentationAndFilterTests(
                 "business_public_id"
             ].read_only
         )
+
+    def test_cancelled_transaction_remains_visible_with_counterparty(self):
+        response = self.client.delete(
+            f"/api/transactions/{self.sale_tx.public_id}/"
+        )
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        debt_response = self.client.get(
+            f"/api/debts/{self.sale_debt.public_id}/"
+        )
+        self.assertEqual(debt_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            debt_response.data["transaction_status_name"],
+            self.void_status.name,
+        )
+        self.assertEqual(
+            str(debt_response.data["customer_public_id"]),
+            str(self.customer.public_id),
+        )
+        self.assertIsNone(debt_response.data["supplier_public_id"])
+        self.assertEqual(debt_response.data["direction"], "receivable")
+
+    def test_list_query_count_does_not_grow_per_transaction_relation(self):
+        query = {
+            "business_public_id": str(self.business_a.public_id),
+            "page_size": 1,
+        }
+        with CaptureQueriesContext(connection) as single_queries:
+            single_response = self.client.get("/api/debts/", query)
+        self.assertEqual(single_response.status_code, status.HTTP_200_OK)
+
+        query["page_size"] = 100
+        with CaptureQueriesContext(connection) as multiple_queries:
+            multiple_response = self.client.get("/api/debts/", query)
+        self.assertEqual(multiple_response.status_code, status.HTTP_200_OK)
+        self.assertGreater(len(get_response_results(multiple_response)), 1)
+        self.assertEqual(len(multiple_queries), len(single_queries))
 
     def test_transaction_type_filter_uses_model_choices(self):
         sale_response = self._list(
@@ -828,4 +1014,36 @@ class FinancialPhaseOneOpenApiTests(
             properties["outstanding_amount"][
                 "readOnly"
             ]
+        )
+        for field_name in (
+            "customer_public_id",
+            "supplier_public_id",
+        ):
+            field = properties[field_name]
+            self.assertEqual(field["type"], "string")
+            self.assertEqual(field["format"], "uuid")
+            self.assertTrue(field["nullable"])
+            self.assertTrue(field["readOnly"])
+
+        transaction_status = properties[
+            "transaction_status_name"
+        ]
+        self.assertEqual(transaction_status["type"], "string")
+        self.assertTrue(transaction_status["readOnly"])
+        self.assertNotIn("nullable", transaction_status)
+
+        payment_status = properties["payment_status"]
+        self.assertTrue(payment_status["readOnly"])
+        self.assertNotIn("nullable", payment_status)
+        enum_component = schema["components"]["schemas"][
+            payment_status["allOf"][0]["$ref"].rsplit("/", 1)[-1]
+        ]
+        self.assertEqual(
+            set(enum_component["enum"]),
+            {value for value, _ in Transaction.PAYMENT_STATUSES},
+        )
+
+        self.assertNotIn(
+            "DebtRequest",
+            schema["components"]["schemas"],
         )

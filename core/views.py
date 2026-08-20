@@ -3109,6 +3109,7 @@ class DebtViewSet(BusinessScopedViewSet):
             "transaction__customer",
             "transaction__supplier",
             "transaction__employee",
+            "transaction__status",
         )
         .annotate(
             outstanding_amount=ExpressionWrapper(

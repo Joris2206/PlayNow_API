@@ -1895,6 +1895,25 @@ class DebtSerializer(serializers.ModelSerializer):
         Transaction,
         source="transaction",
     )
+    customer_public_id = serializers.UUIDField(
+        source="transaction.customer.public_id",
+        read_only=True,
+        allow_null=True,
+    )
+    supplier_public_id = serializers.UUIDField(
+        source="transaction.supplier.public_id",
+        read_only=True,
+        allow_null=True,
+    )
+    transaction_status_name = serializers.CharField(
+        source="transaction.status.name",
+        read_only=True,
+    )
+    payment_status = serializers.ChoiceField(
+        source="transaction.payment_status",
+        choices=Transaction.PAYMENT_STATUSES,
+        read_only=True,
+    )
     direction = serializers.SerializerMethodField()
     outstanding_amount = serializers.DecimalField(
         max_digits=12,
@@ -1929,6 +1948,10 @@ class DebtSerializer(serializers.ModelSerializer):
             "public_id",
             "business_public_id",
             "transaction_public_id",
+            "customer_public_id",
+            "supplier_public_id",
+            "transaction_status_name",
+            "payment_status",
             "direction",
             "total_amount",
             "paid_amount",
