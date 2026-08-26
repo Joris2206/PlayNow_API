@@ -9,6 +9,14 @@ from drf_spectacular.utils import (
 )
 from rest_framework import serializers
 
+from core.api.serializers.fields import (
+    public_id_field,
+    related_name_field,
+)
+from core.api.serializers.status import (
+    DefaultActiveStatusMixin,
+    get_active_status,
+)
 from core.services.debt_payments import (
     get_locked_active_payment_method,
     register_debt_payment,
@@ -28,30 +36,6 @@ from .models import (
     CommissionSettlement, EmployeeCommissionPlan,
     CashMovement, CashRegister
 )
-
-
-# ---------- Relaciones mediante public_id ----------
-def public_id_field(
-    model,
-    *,
-    source=None,
-    required=True,
-    allow_null=False,
-):
-    """Campo relacional que recibe y devuelve el public_id (UUID)."""
-    kwargs = {
-        "slug_field": "public_id",
-        "queryset": model.objects.all(),
-        "required": required,
-        "allow_null": allow_null,
-    }
-
-    if source is not None:
-        kwargs["source"] = source
-
-    return serializers.SlugRelatedField(
-        **kwargs,
-    )
 
 
 def public_id_read_only(
@@ -130,37 +114,6 @@ def active_membership_business_ids(context):
         )
         .values_list("business_id", flat=True)
     )
-
-def related_name_field(
-    source,
-    *,
-    allow_null=False,
-):
-    return serializers.CharField(
-        source=source,
-        read_only=True,
-        allow_null=allow_null,
-    )
-
-def get_active_status():
-    active = EntityStatus.objects.filter(name__iexact="Activo").first()
-    if active is None:
-        raise serializers.ValidationError({
-            "status_public_id": (
-                "No existe el estado inicial 'Activo'. "
-                "Ejecuta el comando seed_statuses."
-            )
-        })
-    return active
-
-
-class DefaultActiveStatusMixin:
-    """Asigna el estado Activo cuando el cliente no envía status."""
-
-    def create(self, validated_data):
-        validated_data.setdefault("status", get_active_status())
-        return super().create(validated_data)
-
 
 from core.api.serializers.auth import (
     HealthSerializer,
