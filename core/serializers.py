@@ -162,32 +162,17 @@ class DefaultActiveStatusMixin:
         return super().create(validated_data)
 
 
-class HealthSerializer(serializers.Serializer):
-    status = serializers.CharField()
-    service = serializers.CharField()
-    
+from core.api.serializers.auth import (
+    HealthSerializer,
+    RegisterSerializer,
+)
+
 # ---------- Usuarios ----------
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ("public_id", "email", "full_name", "phone", "role", "is_active", "created_at", "updated_at")
         read_only_fields = ("public_id", "is_active", "created_at", "updated_at")
-
-class RegisterSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, min_length=8)
-
-    class Meta:
-        model = User
-        fields = ("public_id", "email", "full_name", "password")
-        read_only_fields = ("public_id",)  # ← importante
-
-    def create(self, validated_data):
-        return User.objects.create_user(
-            email=validated_data["email"],
-            full_name=validated_data["full_name"],
-            password=validated_data["password"],
-            role=User.Roles.BUSINESS_OWNER
-        )
 
 class EmployeeAccessCreateSerializer(serializers.Serializer):
     """

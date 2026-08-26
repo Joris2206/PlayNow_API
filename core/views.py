@@ -3,7 +3,7 @@ from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist
 from django.utils import timezone
 from rest_framework import viewsets, mixins, status
 from rest_framework.views import APIView
-from rest_framework.decorators import action, api_view, permission_classes, throttle_classes
+from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, PermissionDenied
@@ -74,7 +74,6 @@ from .serializers import (
     DebtSummaryQuerySerializer,
     EmployeeAccessCreateSerializer,
     EmployeeSelectionSerializer,
-    HealthSerializer,
     InventorySummaryQuerySerializer,
     MonthlyClosureCreateSerializer,
     MonthlyClosureReopenSerializer,
@@ -95,12 +94,18 @@ from datetime import (
     timedelta,
 )
 from uuid import UUID
-from .services.serializer import ChangePasswordSerializer, PasswordResetRequestSerializer, PasswordResetConfirmSerializer
-from django.conf import settings
 from django.shortcuts import get_object_or_404
 from django.utils import timezone as django_timezone
 
-FRONTEND_RESET_URL = settings.FRONTEND_RESET_URL
+from core.api.views.auth import (
+    FRONTEND_RESET_URL,
+    PasswordResetConfirmView,
+    PasswordResetRequestView,
+    REGISTER_EXAMPLE,
+    RegisterViewSet,
+    UserViewSet,
+)
+from core.api.views.health import healthcheck
 
 
 # ---------------------------------------------------------------------------
@@ -149,16 +154,6 @@ TRANSACTION_PUBLIC_ID = "bcd85f11-e36d-4cac-94ca-b005f48843cf"
 DEBT_PUBLIC_ID = "4da69052-bb85-483b-aef8-ad3d14579a49"
 GOAL_PUBLIC_ID = "85af7d8e-8dc8-4616-8609-ce92df799ad6"
 STATUS_PUBLIC_ID = "61823ecf-a0ec-45e3-b909-4ee8780a8246"
-
-REGISTER_EXAMPLE = OpenApiExample(
-    "Registro de propietario",
-    value={
-        "email": "maria.lopez@example.com",
-        "full_name": "María López",
-        "password": "ClaveSegura2026!",
-    },
-    request_only=True,
-)
 
 BUSINESS_CREATE_EXAMPLE = OpenApiExample(
     "Crear tienda",
@@ -511,7 +506,7 @@ from .models import (
     Budget, Goal, GoalProgress, EmployeeCommissionPlan, CommissionSettlement, CashMovement
 )
 from .serializers import (
-    UserSerializer, RegisterSerializer,
+    UserSerializer,
     BusinessSerializer, EntityStatusSerializer,
     ProductCategorySerializer, ProductSerializer,
     EmployeeSerializer, CustomerSerializer, SupplierSerializer, PaymentMethodSerializer,
@@ -854,39 +849,6 @@ def decimal_or_zero(value):
     ).quantize(
         Decimal("0.01")
     )
-
-# -------- Healthcheck (ya lo usaste en /api/health/) --------
-@extend_schema(
-    responses=HealthSerializer,
-    tags=["Health"],
-    examples=[OpenApiExample("OK", value={"status": "ok", "service": "PlayNow API"})],
-)
-@api_view(["GET"])
-@permission_classes([AllowAny])
-@throttle_classes([ScopedRateThrottle])
-def healthcheck(request):
-    return Response({"status": "ok", "service": "PlayNow API"})
-
-# Define el scope para que use tu rate "public_read"
-healthcheck.throttle_scope = "public_read"
-# -------- Auth --------
-@extend_schema_view(
-    create=extend_schema(
-        tags=["Auth"],
-        summary="Registrar propietario",
-        description=(
-            "Crea una cuenta de propietario. El negocio se registra "
-            "posteriormente desde el módulo Businesses."
-        ),
-        examples=[REGISTER_EXAMPLE],
-    ),
-)
-class RegisterViewSet(mixins.CreateModelMixin, viewsets.GenericViewSet):
-    queryset = User.objects.all()
-    serializer_class = RegisterSerializer
-    permission_classes = [AllowAny]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = "auth_register"
 
 # -------- Base mixin para filtrar por usuario --------
 
@@ -3366,63 +3328,6 @@ class GoalProgressViewSet(BusinessScopedViewSet):
             "status__public_id"
         ),
     }
-
-@extend_schema(tags=["Users"])
-class UserViewSet(viewsets.GenericViewSet):
-    permission_classes = [IsAuthenticated]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = "admin_write"
-
-    queryset = User.objects.none()
-
-    @extend_schema(
-        request=ChangePasswordSerializer,
-        responses={204: OpenApiResponse(description="Contraseña actualizada exitosamente.")},
-        tags=["Users"]
-    )
-    @action(methods=["post"], detail=False, url_path="change-password")
-    def change_password(self, request):
-        ser = ChangePasswordSerializer(data=request.data, context={"request": request})
-        ser.is_valid(raise_exception=True)
-        user = request.user
-        user.set_password(ser.validated_data["new_password"])
-        user.save(update_fields=["password"])
-        return Response(status=status.HTTP_204_NO_CONTENT)
-    
-@extend_schema(
-    tags=["Auth"],
-    request=PasswordResetRequestSerializer,
-    responses={200: None},
-    summary="Solicitar restablecimiento de contraseña"
-)
-class PasswordResetRequestView(APIView):
-    permission_classes = [AllowAny]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = "auth_reset_request"
-
-    def post(self, request):
-        ser = PasswordResetRequestSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        ser.save(frontend_reset_url=FRONTEND_RESET_URL)
-        return Response(status=status.HTTP_200_OK)
-
-
-@extend_schema(
-    tags=["Auth"],
-    request=PasswordResetConfirmSerializer,
-    responses={204: None},
-    summary="Confirmar restablecimiento de contraseña"
-)
-class PasswordResetConfirmView(APIView):
-    permission_classes = [AllowAny]
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = "auth_reset_confirm"
-
-    def post(self, request):
-        ser = PasswordResetConfirmSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        ser.save()
-        return Response(status=status.HTTP_204_NO_CONTENT)
 
 @extend_schema_view(
     list=extend_schema(
