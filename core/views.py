@@ -106,6 +106,8 @@ from core.api.views.auth import (
     UserViewSet,
 )
 from core.api.views.health import healthcheck
+from core.api.views.payment_methods import PaymentMethodViewSet
+from core.api.views.statuses import EntityStatusViewSet
 from core.api.schemas.examples import (
     BUDGET_CREATE_EXAMPLE,
     BUSINESS_CREATE_EXAMPLE,
@@ -151,7 +153,7 @@ from core.api.views.report_access import validate_report_business_access
 
 
 from .models import (
-    BusinessMembership, CashRegister, MonthlyClosure, User, Business, EntityStatus,
+    BusinessMembership, CashRegister, MonthlyClosure, User, Business,
     ProductCategory, Product,
     Employee, Customer, Supplier, PaymentMethod,
     Transaction, TransactionDetail, StockMovement,
@@ -160,9 +162,9 @@ from .models import (
 )
 from .serializers import (
     UserSerializer,
-    BusinessSerializer, EntityStatusSerializer,
+    BusinessSerializer,
     ProductCategorySerializer, ProductSerializer,
-    EmployeeSerializer, CustomerSerializer, SupplierSerializer, PaymentMethodSerializer,
+    EmployeeSerializer, CustomerSerializer, SupplierSerializer,
     TransactionSerializer, TransactionUpdateSchemaSerializer,
     TransactionDetailSerializer, StockMovementSerializer,
     DebtSerializer, DebtPaymentSerializer, NotificationSerializer, ReminderSerializer,
@@ -988,21 +990,6 @@ class BusinessViewSet(
             status=status.HTTP_204_NO_CONTENT,
         )
 
-@extend_schema_view(
-    list=extend_schema(tags=["Statuses"]),
-    retrieve=extend_schema(tags=["Statuses"]),
-)
-class EntityStatusViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = EntityStatus.objects.all()
-    serializer_class = EntityStatusSerializer
-    permission_classes = [IsAuthenticated]
-    lookup_field = "public_id"
-    lookup_url_kwarg = "public_id"
-    pagination_class = StandardResultsSetPagination   # opcional (por si lista crece)
-
-
-
-
 class PublicCatalogViewSet(
     viewsets.ReadOnlyModelViewSet,
 ):
@@ -1500,114 +1487,6 @@ class SupplierViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     ordering = ["-created_at"]
 
     pagination_class = StandardResultsSetPagination
-
-
-@extend_schema_view(
-    list=extend_schema(tags=["Payment Methods"]),
-    retrieve=extend_schema(tags=["Payment Methods"]),
-    create=extend_schema(
-        tags=["Payment Methods"],
-        description="Crea un método de pago disponible para el negocio.",
-        examples=[PAYMENT_METHOD_CREATE_EXAMPLE],
-    ),
-    update=extend_schema(tags=["Payment Methods"]),
-    partial_update=extend_schema(tags=["Payment Methods"]),
-    destroy=extend_schema(tags=["Payment Methods"]),
-)
-class PaymentMethodViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
-    queryset = PaymentMethod.objects.select_related(
-        "business",
-        "status",
-    ).all()
-    serializer_class = PaymentMethodSerializer
-
-    business_lookup = "business"
-
-    read_allowed_roles = [
-        BusinessMembership.ROLE_OWNER,
-        BusinessMembership.ROLE_ADMIN,
-        BusinessMembership.ROLE_CASHIER,
-        BusinessMembership.ROLE_SELLER,
-        BusinessMembership.ROLE_INVENTORY,
-        BusinessMembership.ROLE_VIEWER,
-    ]
-
-    create_allowed_roles = [
-        BusinessMembership.ROLE_OWNER,
-        BusinessMembership.ROLE_ADMIN,
-    ]
-
-    update_allowed_roles = create_allowed_roles
-    destroy_allowed_roles = create_allowed_roles
-
-    lookup_field = "public_id"
-    lookup_url_kwarg = "public_id"
-    pagination_class = StandardResultsSetPagination
-
-    public_id_filter_fields = {
-        "status_public_id": (
-            "status__public_id"
-        ),
-    }
-
-    search_fields = ["name"]
-
-    administrative_read_roles = [
-        BusinessMembership.ROLE_OWNER,
-        BusinessMembership.ROLE_ADMIN,
-        BusinessMembership.ROLE_VIEWER,
-    ]
-
-    operational_read_roles = [
-        BusinessMembership.ROLE_CASHIER,
-        BusinessMembership.ROLE_SELLER,
-        BusinessMembership.ROLE_INVENTORY,
-    ]
-
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        user = self.request.user
-
-        if user.is_superuser:
-            return queryset
-
-        administrative_businesses = (
-            BusinessMembership.objects
-            .filter(
-                user=user,
-                is_active=True,
-                role__in=(
-                    self.administrative_read_roles
-                ),
-            )
-            .values("business_id")
-        )
-
-        operational_businesses = (
-            BusinessMembership.objects
-            .filter(
-                user=user,
-                is_active=True,
-                role__in=(
-                    self.operational_read_roles
-                ),
-            )
-            .values("business_id")
-        )
-
-        return queryset.filter(
-            Q(
-                business_id__in=(
-                    administrative_businesses
-                ),
-            )
-            | Q(
-                business_id__in=(
-                    operational_businesses
-                ),
-                status__name__iexact="Activo",
-            )
-        ).distinct()
 
 
 @extend_schema_view(

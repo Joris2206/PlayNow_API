@@ -13,8 +13,10 @@ from core.api.serializers.fields import (
     public_id_field,
     related_name_field,
 )
+from core.api.serializers.payment_methods import PaymentMethodSerializer
 from core.api.serializers.status import (
     DefaultActiveStatusMixin,
+    EntityStatusSerializer,
     get_active_status,
 )
 from core.services.debt_payments import (
@@ -237,45 +239,6 @@ class EmployeeAccessCreateSerializer(serializers.Serializer):
             role=membership_role,
             is_active=True,
         )
-
-# ---------- Catálogos/Estados ----------
-class EntityStatusSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = EntityStatus
-        fields = ("public_id", "name")
-        read_only_fields = ("public_id",)
-
-class PaymentMethodSerializer(
-    DefaultActiveStatusMixin,
-    serializers.ModelSerializer,
-):
-    business_public_id = public_id_field(
-        Business,
-        source="business",
-    )
-    status_public_id = public_id_field(
-        EntityStatus,
-        source="status",
-        required=False,
-    )
-    status_name = related_name_field("status.name")
-
-    class Meta:
-        model = PaymentMethod
-        fields = (
-            "public_id",
-            "business_public_id",
-            "name",
-            "method_type",
-            "status_public_id",
-            "status_name",
-        )
-        read_only_fields = ("public_id",)
-        extra_kwargs = {
-            "method_type": {
-                "required": True,
-            },
-        }
 
 class BusinessSerializer(
     DefaultActiveStatusMixin,

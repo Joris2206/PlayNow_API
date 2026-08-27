@@ -21,3 +21,10 @@ class DefaultActiveStatusMixin:
     def create(self, validated_data):
         validated_data.setdefault("status", get_active_status())
         return super().create(validated_data)
+
+
+class EntityStatusSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EntityStatus
+        fields = ("public_id", "name")
+        read_only_fields = ("public_id",)
