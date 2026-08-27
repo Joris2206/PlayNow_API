@@ -13,12 +13,14 @@ from core.api.serializers.fields import (
     public_id_field,
     related_name_field,
 )
+from core.api.serializers.customers import CustomerSerializer
 from core.api.serializers.payment_methods import PaymentMethodSerializer
 from core.api.serializers.status import (
     DefaultActiveStatusMixin,
     EntityStatusSerializer,
     get_active_status,
 )
+from core.api.serializers.suppliers import SupplierSerializer
 from core.services.debt_payments import (
     get_locked_active_payment_method,
     register_debt_payment,
@@ -658,52 +660,6 @@ class EmployeeSelectionSerializer(serializers.ModelSerializer):
             "position",
         )
         read_only_fields = fields
-
-class CustomerSerializer(
-    DefaultActiveStatusMixin,
-    serializers.ModelSerializer,
-):
-    business_public_id = public_id_field(
-        Business,
-        source="business",
-    )
-    status_public_id = public_id_field(
-        EntityStatus,
-        source="status",
-        required=False,
-    )
-    status_name = related_name_field("status.name")
-    class Meta:
-        model = Customer
-        fields = ("public_id", "business_public_id", "full_name", "phone", "email", "status_public_id", "status_name", "created_at", "updated_at")
-        read_only_fields = (
-            "public_id",
-            "created_at",
-            "updated_at",
-        )
-
-class SupplierSerializer(
-    DefaultActiveStatusMixin,
-    serializers.ModelSerializer,
-):
-    business_public_id = public_id_field(
-        Business,
-        source="business",
-    )
-    status_public_id = public_id_field(
-        EntityStatus,
-        source="status",
-        required=False,
-    )
-    status_name = related_name_field("status.name")
-    class Meta:
-        model = Supplier
-        fields = ("public_id", "business_public_id", "name", "phone", "email", "status_public_id", "status_name", "created_at", "updated_at")
-        read_only_fields = (
-            "public_id",
-            "created_at",
-            "updated_at",
-        )
 
 class TransactionDetailSerializer(
     serializers.ModelSerializer
