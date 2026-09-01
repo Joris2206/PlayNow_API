@@ -9,9 +9,13 @@ from drf_spectacular.utils import (
 )
 from rest_framework import serializers
 
+from core.api.serializers.access import active_membership_business_ids
 from core.api.serializers.fields import (
+    SecurePublicIdRelatedField,
     public_id_field,
+    public_id_read_only,
     related_name_field,
+    secure_public_id_field,
 )
 from core.api.serializers.customers import CustomerSerializer
 from core.api.serializers.employees import (
@@ -44,84 +48,6 @@ from .models import (
     CommissionSettlement, EmployeeCommissionPlan,
     CashMovement, CashRegister
 )
-
-
-def public_id_read_only(
-    *,
-    source=None,
-    allow_null=False,
-):
-    """Campo relacional de solo lectura representado por public_id."""
-    kwargs = {
-        "slug_field": "public_id",
-        "read_only": True,
-        "allow_null": allow_null,
-    }
-
-    if source is not None:
-        kwargs["source"] = source
-
-    return serializers.SlugRelatedField(**kwargs)
-
-
-class SecurePublicIdRelatedField(
-    serializers.SlugRelatedField
-):
-    default_error_messages = {
-        **serializers.SlugRelatedField.default_error_messages,
-        "does_not_exist": (
-            "La relación indicada no es válida."
-        ),
-    }
-
-
-def secure_public_id_field(
-    model,
-    *,
-    source=None,
-    required=True,
-    allow_null=False,
-):
-    kwargs = {
-        "slug_field": "public_id",
-        "queryset": model.objects.all(),
-        "required": required,
-        "allow_null": allow_null,
-    }
-
-    if source is not None:
-        kwargs["source"] = source
-
-    return SecurePublicIdRelatedField(
-        **kwargs,
-    )
-
-
-def active_membership_business_ids(context):
-    request = context.get("request")
-    user = getattr(request, "user", None)
-
-    if (
-        user is not None
-        and user.is_authenticated
-        and user.is_superuser
-    ):
-        return None
-
-    if user is None or not user.is_authenticated:
-        return (
-            Business.objects.none()
-            .values_list("pk", flat=True)
-        )
-
-    return (
-        BusinessMembership.objects
-        .filter(
-            user=user,
-            is_active=True,
-        )
-        .values_list("business_id", flat=True)
-    )
 
 from core.api.serializers.auth import (
     HealthSerializer,

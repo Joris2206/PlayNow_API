@@ -1,6 +1,57 @@
 from rest_framework import serializers
 
 
+def public_id_read_only(
+    *,
+    source=None,
+    allow_null=False,
+):
+    """Campo relacional de solo lectura representado por public_id."""
+    kwargs = {
+        "slug_field": "public_id",
+        "read_only": True,
+        "allow_null": allow_null,
+    }
+
+    if source is not None:
+        kwargs["source"] = source
+
+    return serializers.SlugRelatedField(**kwargs)
+
+
+class SecurePublicIdRelatedField(
+    serializers.SlugRelatedField
+):
+    default_error_messages = {
+        **serializers.SlugRelatedField.default_error_messages,
+        "does_not_exist": (
+            "La relación indicada no es válida."
+        ),
+    }
+
+
+def secure_public_id_field(
+    model,
+    *,
+    source=None,
+    required=True,
+    allow_null=False,
+):
+    kwargs = {
+        "slug_field": "public_id",
+        "queryset": model.objects.all(),
+        "required": required,
+        "allow_null": allow_null,
+    }
+
+    if source is not None:
+        kwargs["source"] = source
+
+    return SecurePublicIdRelatedField(
+        **kwargs,
+    )
+
+
 def public_id_field(
     model,
     *,
