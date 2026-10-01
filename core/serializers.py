@@ -37,7 +37,11 @@ from core.services.financial_flows import (
     exclude_terminal_transactions,
     is_terminal_transaction_status,
 )
-from core.utils import calculate_employee_advance_summary
+from core.services.commissions import (
+    CommissionDomainError,
+    validate_commission_plan_candidate,
+    validate_period,
+)
 from .models import (
     BusinessMembership, MonthlyClosure, User, Business, EntityStatus,
     ProductCategory, Product,
@@ -2259,61 +2263,34 @@ class EmployeeCommissionPlanSerializer(
             ),
         )
 
-        if (
-            valid_from is not None
-            and valid_until is not None
-            and valid_until < valid_from
-        ):
-            raise serializers.ValidationError({
-                "valid_until": (
-                    "La fecha final no puede ser "
-                    "anterior a la fecha inicial."
-                )
-            })
-
-        if employee is None:
+        if employee is None or valid_from is None:
             return attrs
 
-        overlapping_plans = (
-            EmployeeCommissionPlan.objects
-            .filter(
-                employee=employee,
-                is_active=True,
+        is_active = attrs.get(
+            "is_active",
+            getattr(self.instance, "is_active", True),
+        )
+
+        requires_active_employee = (
+            self.instance is None
+            or employee.pk != self.instance.employee_id
+            or (
+                is_active
+                and not self.instance.is_active
             )
         )
 
-        if self.instance is not None:
-            overlapping_plans = (
-                overlapping_plans.exclude(
-                    pk=self.instance.pk
-                )
+        try:
+            validate_commission_plan_candidate(
+                employee=employee,
+                valid_from=valid_from,
+                valid_until=valid_until,
+                is_active=is_active,
+                exclude_plan=self.instance,
+                require_employee_active=requires_active_employee,
             )
-
-        if valid_from is not None:
-            overlapping_plans = (
-                overlapping_plans.filter(
-                    Q(valid_until__isnull=True)
-                    | Q(
-                        valid_until__gte=valid_from
-                    )
-                )
-            )
-
-        if valid_until is not None:
-            overlapping_plans = (
-                overlapping_plans.filter(
-                    valid_from__lte=valid_until
-                )
-            )
-
-        if overlapping_plans.exists():
-            raise serializers.ValidationError({
-                "valid_from": (
-                    "El empleado ya tiene un plan "
-                    "de comisión activo que coincide "
-                    "con ese período."
-                )
-            })
+        except CommissionDomainError as exc:
+            raise serializers.ValidationError(exc.errors)
 
         return attrs
 
@@ -2404,195 +2381,19 @@ class CommissionSettlementCreateSerializer(
     period_end = serializers.DateField()
 
     def validate(self, attrs):
-        employee = attrs["employee"]
         period_start = attrs["period_start"]
         period_end = attrs["period_end"]
 
-        if period_end < period_start:
-            raise serializers.ValidationError({
-                "period_end": (
-                    "La fecha final no puede ser "
-                    "anterior a la fecha inicial."
-                )
-            })
-
-        existing_settlement = (
-            CommissionSettlement.objects
-            .filter(
-                employee=employee,
+        try:
+            validate_period(
                 period_start=period_start,
                 period_end=period_end,
             )
-            .exists()
-        )
-
-        if existing_settlement:
-            raise serializers.ValidationError({
-                "period": (
-                    "Ya existe una liquidación para "
-                    "este empleado y período."
-                )
-            })
-
-        commission_plan = (
-            EmployeeCommissionPlan.objects
-            .filter(
-                employee=employee,
-                is_active=True,
-                valid_from__lte=period_end,
-            )
-            .filter(
-                Q(valid_until__isnull=True)
-                | Q(
-                    valid_until__gte=period_start
-                )
-            )
-            .order_by("-valid_from")
-            .first()
-        )
-
-        if commission_plan is None:
-            raise serializers.ValidationError({
-                "commission_plan": (
-                    "El empleado no tiene un plan "
-                    "de comisión vigente para "
-                    "este período."
-                )
-            })
-
-        attrs["commission_plan"] = (
-            commission_plan
-        )
+        except CommissionDomainError as exc:
+            raise serializers.ValidationError(exc.errors)
 
         return attrs
 
-    def create(self, validated_data):
-        request = self.context["request"]
-
-        employee = validated_data[
-            "employee"
-        ]
-
-        period_start = validated_data[
-            "period_start"
-        ]
-
-        period_end = validated_data[
-            "period_end"
-        ]
-
-        commission_plan = validated_data[
-            "commission_plan"
-        ]
-
-        sales = (
-            Transaction.objects
-            .filter(
-                business=employee.business,
-                employee=employee,
-                type="sale",
-                created_at__date__gte=(
-                    period_start
-                ),
-                created_at__date__lte=(
-                    period_end
-                ),
-            )
-        )
-        sales = exclude_terminal_transactions(sales)
-
-        summary = sales.aggregate(
-            sales_total=Sum("total_value"),
-        )
-
-        sales_count = sales.count()
-
-        sales_total = (
-            summary["sales_total"]
-            or Decimal("0.00")
-        ).quantize(
-            Decimal("0.01")
-        )
-
-        commission_percentage = (
-            commission_plan.percentage
-        )
-
-        commission_total = (
-            sales_total
-            * commission_percentage
-            / Decimal("100.00")
-        ).quantize(
-            Decimal("0.01")
-        )
-
-        advance_summary = (
-            calculate_employee_advance_summary(
-                employee=employee,
-                period_start=period_start,
-                period_end=period_end,
-            )
-        )
-
-        employee_advances = advance_summary[
-            "employee_advances"
-        ]
-
-        employee_repayments = advance_summary[
-            "employee_repayments"
-        ]
-
-        advance_balance = advance_summary[
-            "advance_balance"
-        ]
-
-        net_commission_payable = max(
-            commission_total - advance_balance,
-            Decimal("0.00"),
-        ).quantize(
-            Decimal("0.01")
-        )
-
-        remaining_advance_balance = max(
-            advance_balance - commission_total,
-            Decimal("0.00"),
-        ).quantize(
-            Decimal("0.01")
-        )
-
-        return CommissionSettlement.objects.create(
-            employee=employee,
-            period_start=period_start,
-            period_end=period_end,
-            sales_count=sales_count,
-            sales_total=sales_total,
-            commission_percentage=(
-                commission_percentage
-            ),
-            commission_total=(
-                commission_total
-            ),
-            employee_advances=(
-                employee_advances
-            ),
-            employee_repayments=(
-                employee_repayments
-            ),
-            advance_balance=(
-                advance_balance
-            ),
-            net_commission_payable=(
-                net_commission_payable
-            ),
-            remaining_advance_balance=(
-                remaining_advance_balance
-            ),
-            status=(
-                CommissionSettlement.STATUS_PENDING
-            ),
-            created_by=request.user,
-        )
-        
 class CashRegisterSerializer(
     serializers.ModelSerializer
 ):

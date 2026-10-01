@@ -18,6 +18,13 @@ from drf_spectacular.utils import (
 )
 from django_filters import rest_framework as filters
 from core.services.customer_supplier_reports import build_customers_summary, build_suppliers_summary
+from core.services.commissions import (
+    CommissionDomainError,
+    calculate_commission,
+    is_settlement_period_unique_violation,
+    lock_employees,
+    validate_commission_plan_candidate,
+)
 from core.services.dashboard import build_dashboard_overview
 from core.services.inventory_report import build_inventory_summary
 from core.services.inventory import (
@@ -54,7 +61,7 @@ from django.db.models import (
     Q,
     Sum,
 )
-from core.utils import calculate_employee_advance_summary, log_action
+from core.utils import log_action
 from rest_framework.throttling import ScopedRateThrottle
 from .serializers import (
     BusinessMembershipSerializer,
@@ -172,6 +179,71 @@ from .serializers import (
     CommissionSettlementCreateSerializer, CommissionSettlementSerializer, EmployeeCommissionPlanSerializer,
 )
 from .permissions import IsOwnerOrBusinessOwner
+
+
+COMMISSION_MANAGEMENT_ROLES = (
+    BusinessMembership.ROLE_OWNER,
+    BusinessMembership.ROLE_ADMIN,
+)
+
+
+def get_commission_create_business(request):
+    user = request.user
+    raw_business_public_id = request.data.get(
+        "business_public_id"
+    )
+
+    if user.is_superuser:
+        if not raw_business_public_id:
+            return None
+        return get_object_or_404(
+            Business,
+            public_id=raw_business_public_id,
+        )
+
+    active_memberships = (
+        BusinessMembership.objects
+        .select_related("business")
+        .filter(
+            user=user,
+            is_active=True,
+        )
+    )
+
+    management_memberships = active_memberships.filter(
+        role__in=COMMISSION_MANAGEMENT_ROLES,
+    )
+
+    if not management_memberships.exists():
+        raise PermissionDenied(
+            "Solo el propietario o un administrador puede gestionar "
+            "comisiones."
+        )
+
+    if not raw_business_public_id:
+        if active_memberships.count() == 1:
+            return management_memberships.get().business
+        raise ValidationError({
+            "business_public_id": "Este parámetro es obligatorio."
+        })
+
+    try:
+        business_public_id = UUID(str(raw_business_public_id))
+    except (TypeError, ValueError):
+        raise ValidationError({
+            "business_public_id": "Debe ser un UUID válido."
+        })
+
+    membership = management_memberships.filter(
+        business__public_id=business_public_id,
+    ).first()
+    if membership is not None:
+        return membership.business
+
+    raise PermissionDenied(
+        "Solo el propietario o un administrador puede gestionar "
+        "comisiones."
+    )
 
 
 def calculate_cash_register_summary(
@@ -1967,6 +2039,10 @@ class EmployeeCommissionPlanViewSet(
             .filter(
                 employee__business__memberships__user=user,
                 employee__business__memberships__is_active=True,
+                employee__business__memberships__role__in=[
+                    BusinessMembership.ROLE_OWNER,
+                    BusinessMembership.ROLE_ADMIN,
+                ],
             )
             .distinct()
         )
@@ -1980,22 +2056,55 @@ class EmployeeCommissionPlanViewSet(
             business=employee.business,
         )
 
+    def _scope_employee_field(self, serializer, business):
+        if business is not None:
+            serializer.fields["employee_public_id"].queryset = (
+                Employee.objects.filter(business=business)
+            )
+
+    def create(self, request, *args, **kwargs):
+        business = get_commission_create_business(request)
+        serializer = self.get_serializer(data=request.data)
+        self._scope_employee_field(serializer, business)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            serializer.data,
+            status=status.HTTP_201_CREATED,
+            headers=headers,
+        )
+
     @db_tx.atomic
     def perform_create(
         self,
         serializer,
     ):
-        employee = (
+        submitted_employee = (
             serializer.validated_data[
                 "employee"
             ]
         )
 
         self._validate_management_access(
-            employee
+            submitted_employee
         )
 
-        plan = serializer.save()
+        employee = lock_employees(
+            submitted_employee
+        )[submitted_employee.pk]
+
+        try:
+            validate_commission_plan_candidate(
+                employee=employee,
+                valid_from=serializer.validated_data["valid_from"],
+                valid_until=serializer.validated_data.get("valid_until"),
+                is_active=serializer.validated_data.get("is_active", True),
+            )
+        except CommissionDomainError as exc:
+            raise ValidationError(exc.errors)
+
+        plan = serializer.save(employee=employee)
 
         log_action(
             self.request.user,
@@ -2004,30 +2113,83 @@ class EmployeeCommissionPlanViewSet(
             plan.pk,
         )
 
-    @db_tx.atomic
-    def perform_update(
-        self,
-        serializer,
-    ):
-        employee = (
-            serializer.validated_data.get(
+    def _get_locked_plan(self):
+        visible_plan_ids = self.filter_queryset(
+            self.get_queryset()
+        ).values("pk")
+        lookup_value = self.kwargs[self.lookup_url_kwarg]
+        plan = get_object_or_404(
+            EmployeeCommissionPlan.objects
+            .select_for_update()
+            .select_related(
                 "employee",
-                serializer.instance.employee,
+                "employee__business",
+                "employee__status",
             )
+            .filter(pk__in=visible_plan_ids),
+            **{self.lookup_field: lookup_value},
+        )
+        self.check_object_permissions(self.request, plan)
+        return plan
+
+    @db_tx.atomic
+    def update(self, request, *args, **kwargs):
+        # Lock order: plan first, then the distinct source/target employees
+        # by PK through lock_employees(). Plan creation only locks an employee
+        # before inserting a new plan row, so these flows cannot form a cycle.
+        partial = kwargs.pop("partial", False)
+        plan = self._get_locked_plan()
+        serializer = self.get_serializer(
+            plan,
+            data=request.data,
+            partial=partial,
+        )
+        serializer.is_valid(raise_exception=True)
+
+        submitted_employee = serializer.validated_data.get(
+            "employee",
+            plan.employee,
+        )
+        self._validate_management_access(submitted_employee)
+
+        locked_employees = lock_employees(
+            plan.employee,
+            submitted_employee,
+        )
+        employee = locked_employees[submitted_employee.pk]
+        valid_from = serializer.validated_data.get(
+            "valid_from",
+            plan.valid_from,
+        )
+        valid_until = serializer.validated_data.get(
+            "valid_until",
+            plan.valid_until,
+        )
+        is_active = serializer.validated_data.get(
+            "is_active",
+            plan.is_active,
         )
 
-        self._validate_management_access(
-            employee
-        )
+        try:
+            validate_commission_plan_candidate(
+                employee=employee,
+                valid_from=valid_from,
+                valid_until=valid_until,
+                is_active=is_active,
+                exclude_plan=plan,
+                require_employee_active=True,
+            )
+        except CommissionDomainError as exc:
+            raise ValidationError(exc.errors)
 
-        plan = serializer.save()
-
+        plan = serializer.save(employee=employee)
         log_action(
-            self.request.user,
+            request.user,
             "UPDATE",
             plan.__class__.__name__,
             plan.pk,
         )
+        return Response(serializer.data)
 
     @db_tx.atomic
     def perform_destroy(
@@ -2362,101 +2524,15 @@ class EmployeeCommissionPreviewView(
             business=business,
         )
 
-        commission_plan = (
-            EmployeeCommissionPlan.objects
-            .filter(
+        try:
+            calculation = calculate_commission(
                 employee=employee,
-                is_active=True,
-                valid_from__lte=date_to,
-            )
-            .filter(
-                Q(valid_until__isnull=True)
-                | Q(
-                    valid_until__gte=date_from
-                )
-            )
-            .order_by("-valid_from")
-            .first()
-        )
-
-        if commission_plan is None:
-            raise ValidationError({
-                "commission_plan": (
-                    "El empleado no tiene un plan "
-                    "de comisión vigente para "
-                    "ese período."
-                )
-            })
-
-        sales = (
-            Transaction.objects
-            .filter(
                 business=business,
-                employee=employee,
-                type="sale",
-                created_at__date__range=(
-                    date_from,
-                    date_to,
-                ),
-            )
-        )
-        sales = exclude_terminal_transactions(sales)
-
-        summary = sales.aggregate(
-            sales_count=Count("id"),
-            sales_total=Sum("total_value"),
-        )
-
-        sales_total = (
-            summary["sales_total"]
-            or Decimal("0.00")
-        )
-
-        percentage = (
-            commission_plan.percentage
-        )
-
-        commission_total = (
-            sales_total
-            * percentage
-            / Decimal("100.00")
-        ).quantize(
-            Decimal("0.01")
-        )
-
-        advance_summary = (
-            calculate_employee_advance_summary(
-                employee=employee,
                 period_start=date_from,
                 period_end=date_to,
             )
-        )
-
-        employee_advances = advance_summary[
-            "employee_advances"
-        ]
-
-        employee_repayments = advance_summary[
-            "employee_repayments"
-        ]
-
-        advance_balance = advance_summary[
-            "advance_balance"
-        ]
-
-        net_commission_payable = max(
-            commission_total - advance_balance,
-            Decimal("0.00"),
-        ).quantize(
-            Decimal("0.01")
-        )
-
-        remaining_advance_balance = max(
-            advance_balance - commission_total,
-            Decimal("0.00"),
-        ).quantize(
-            Decimal("0.01")
-        )
+        except CommissionDomainError as exc:
+            raise ValidationError(exc.errors)
 
         return Response({
             "business": {
@@ -2476,37 +2552,33 @@ class EmployeeCommissionPreviewView(
                 "date_from": date_from,
                 "date_to": date_to,
             },
-            "sales_count": summary["sales_count"],
+            "sales_count": calculation.sales_count,
             "sales_total": str(
-                sales_total.quantize(
-                    Decimal("0.01")
-                )
+                calculation.sales_total
             ),
             "commission_percentage": str(
-                percentage.quantize(
-                    Decimal("0.01")
-                )
+                calculation.commission_percentage
             ),
             "commission_total": str(
-                commission_total
+                calculation.commission_total
             ),
             "employee_advances": str(
-                employee_advances
+                calculation.employee_advances
             ),
             "employee_repayments": str(
-                employee_repayments
+                calculation.employee_repayments
             ),
             "advance_balance": str(
-                advance_balance
+                calculation.advance_balance
             ),
             "net_commission_payable": str(
-                net_commission_payable
+                calculation.net_commission_payable
             ),
             "remaining_advance_balance": str(
-                remaining_advance_balance
+                calculation.remaining_advance_balance
             ),
             "commission_plan_public_id": str(
-                commission_plan.public_id
+                calculation.plan.public_id
             ),
         })
 @extend_schema_view(
@@ -2680,6 +2752,18 @@ class CommissionSettlementViewSet(
                 "liquidaciones de comisiones."
             )
 
+    def _get_locked_settlement(self, settlement_pk):
+        return get_object_or_404(
+            CommissionSettlement.objects
+            .select_for_update()
+            .select_related(
+                "employee",
+                "employee__business",
+                "created_by",
+            ),
+            pk=settlement_pk,
+        )
+
     @db_tx.atomic
     def create(
         self,
@@ -2687,27 +2771,79 @@ class CommissionSettlementViewSet(
         *args,
         **kwargs,
     ):
+        business = get_commission_create_business(request)
         serializer = (
             self.get_serializer(
                 data=request.data,
             )
         )
 
+        if business is not None:
+            serializer.fields["employee_public_id"].queryset = (
+                Employee.objects.filter(business=business)
+            )
+
         serializer.is_valid(
             raise_exception=True
         )
 
-        employee = (
+        submitted_employee = (
             serializer.validated_data[
                 "employee"
             ]
         )
 
         self._validate_management_access(
-            employee.business
+            submitted_employee.business
         )
 
-        settlement = serializer.save()
+        employee = lock_employees(
+            submitted_employee
+        )[submitted_employee.pk]
+
+        try:
+            calculation = calculate_commission(
+                employee=employee,
+                business=employee.business,
+                period_start=serializer.validated_data["period_start"],
+                period_end=serializer.validated_data["period_end"],
+            )
+        except CommissionDomainError as exc:
+            raise ValidationError(exc.errors)
+
+        try:
+            with db_tx.atomic():
+                settlement = CommissionSettlement.objects.create(
+                    employee=employee,
+                    period_start=serializer.validated_data["period_start"],
+                    period_end=serializer.validated_data["period_end"],
+                    sales_count=calculation.sales_count,
+                    sales_total=calculation.sales_total,
+                    commission_percentage=(
+                        calculation.commission_percentage
+                    ),
+                    commission_total=calculation.commission_total,
+                    employee_advances=calculation.employee_advances,
+                    employee_repayments=calculation.employee_repayments,
+                    advance_balance=calculation.advance_balance,
+                    net_commission_payable=(
+                        calculation.net_commission_payable
+                    ),
+                    remaining_advance_balance=(
+                        calculation.remaining_advance_balance
+                    ),
+                    status=CommissionSettlement.STATUS_PENDING,
+                    created_by=request.user,
+                )
+        except IntegrityError as exc:
+            if not is_settlement_period_unique_violation(exc):
+                raise
+            raise ValidationError({
+                "period": (
+                    "Ya existe una liquidación para este empleado con un "
+                    "período que se solapa."
+                )
+            })
 
         log_action(
             request.user,
@@ -2751,7 +2887,11 @@ class CommissionSettlementViewSet(
         request,
         public_id=None,
     ):
-        settlement = self.get_object()
+        visible_settlement = self.get_object()
+
+        settlement = self._get_locked_settlement(
+            visible_settlement.pk
+        )
 
         self._validate_management_access(
             settlement.employee.business
