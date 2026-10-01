@@ -1,4 +1,5 @@
 from decimal import Decimal
+from typing import Literal, NamedTuple
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction as db_tx
 from django.db.models import Sum, Q
@@ -3277,6 +3278,55 @@ class SupplierSummaryQuerySerializer(
         return attrs
 
 # ---------- Lecturas (solo por si las quieres exponer) ----------
+_StockMovementOriginType = Literal[
+    "sale",
+    "purchase",
+    "adjustment",
+    "unknown",
+]
+
+
+class _StockMovementOrigin(NamedTuple):
+    origin_type: _StockMovementOriginType
+    is_reversal: bool | None
+
+
+def _resolve_stock_movement_origin(
+    movement: StockMovement,
+) -> _StockMovementOrigin:
+    """Classify a movement using only its already-loaded relations."""
+    transaction = (
+        movement.transaction
+        if movement.transaction_id is not None
+        else None
+    )
+    has_detail = movement.transaction_detail_id is not None
+
+    if transaction is None:
+        if movement.type == "adjustment" and not has_detail:
+            return _StockMovementOrigin("adjustment", None)
+
+        return _StockMovementOrigin("unknown", None)
+
+    if has_detail:
+        if movement.type == "sale" and transaction.type == "sale":
+            return _StockMovementOrigin("sale", False)
+
+        if movement.type == "entry" and transaction.type == "purchase":
+            return _StockMovementOrigin("purchase", False)
+
+        return _StockMovementOrigin("unknown", None)
+
+    if movement.type == "adjustment":
+        if transaction.type == "sale":
+            return _StockMovementOrigin("sale", True)
+
+        if transaction.type == "purchase":
+            return _StockMovementOrigin("purchase", True)
+
+    return _StockMovementOrigin("unknown", None)
+
+
 class StockMovementSerializer(serializers.ModelSerializer):
     product_public_id = public_id_read_only(
         source="product",
@@ -3295,6 +3345,29 @@ class StockMovementSerializer(serializers.ModelSerializer):
         read_only=True,
         allow_null=True,
     )
+    origin_type = serializers.SerializerMethodField()
+    is_reversal = serializers.SerializerMethodField()
+
+    @extend_schema_field({
+        "type": "string",
+        "enum": [
+            "sale",
+            "purchase",
+            "adjustment",
+            "unknown",
+        ],
+        "readOnly": True,
+    })
+    def get_origin_type(self, obj):
+        return _resolve_stock_movement_origin(obj).origin_type
+
+    @extend_schema_field({
+        "type": "boolean",
+        "nullable": True,
+        "readOnly": True,
+    })
+    def get_is_reversal(self, obj):
+        return _resolve_stock_movement_origin(obj).is_reversal
 
     class Meta:
         model = StockMovement
@@ -3310,6 +3383,8 @@ class StockMovementSerializer(serializers.ModelSerializer):
             "created_by_email",
             "created_at",
             "updated_at",
+            "origin_type",
+            "is_reversal",
         )
         read_only_fields = fields
 

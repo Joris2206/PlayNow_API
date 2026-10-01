@@ -1308,7 +1308,13 @@ class ProductViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
 class StockMovementViewSet(BusinessScopedViewSet):
     queryset = (
         StockMovement.objects
-        .select_related("product", "product__business", "transaction")
+        .select_related(
+            "product",
+            "product__business",
+            "transaction",
+            "transaction_detail",
+            "created_by",
+        )
         .all()
     )
     serializer_class = StockMovementSerializer
