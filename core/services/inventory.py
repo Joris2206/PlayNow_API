@@ -99,3 +99,59 @@ def record_stock_movement(
         note=note,
         insufficient_stock_message=insufficient_stock_message,
     )
+
+
+@db_tx.atomic
+def adjust_product_stock(
+    *,
+    product_id,
+    business_id,
+    quantity,
+    note,
+    created_by,
+):
+    """Apply one authorized manual adjustment and return its stock bounds."""
+    product = (
+        Product.objects
+        .select_for_update(of=("self",))
+        .get(
+            pk=product_id,
+            business_id=business_id,
+        )
+    )
+
+    if product.status.name.casefold() != "activo".casefold():
+        raise ValidationError({
+            "product": [
+                "El producto debe estar Activo para ajustar su stock."
+            ],
+        })
+
+    if quantity == 0:
+        raise ValidationError({
+            "quantity": ["La cantidad debe ser distinta de cero."],
+        })
+
+    previous_stock = product.stock
+    new_stock = previous_stock + quantity
+
+    if new_stock < 0:
+        raise ValidationError({
+            "quantity": [
+                "El ajuste dejaría el stock en un valor negativo."
+            ],
+        })
+
+    movement = record_locked_stock_movement(
+        product=product,
+        quantity=quantity,
+        movement_type="adjustment",
+        created_by=created_by,
+        note=note,
+    )
+
+    return {
+        "previous_stock": previous_stock,
+        "new_stock": new_stock,
+        "movement": movement,
+    }

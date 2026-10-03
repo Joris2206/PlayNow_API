@@ -28,6 +28,7 @@ from core.services.commissions import (
 from core.services.dashboard import build_dashboard_overview
 from core.services.inventory_report import build_inventory_summary
 from core.services.inventory import (
+    adjust_product_stock,
     lock_products_for_inventory,
     record_locked_stock_movement,
 )
@@ -91,6 +92,9 @@ from .serializers import (
     TransactionCancellationConflictResponseSerializer,
     PublicProductCategorySerializer,
     PublicProductSerializer,
+    ProductStockAdjustmentSerializer,
+    ProductStockAdjustmentResponseSerializer,
+    ProductStockAdjustmentValidationErrorSerializer,
 )
 from datetime import (
     date,
@@ -178,7 +182,7 @@ from .serializers import (
     BudgetSerializer, GoalSerializer, GoalProgressSerializer, 
     CommissionSettlementCreateSerializer, CommissionSettlementSerializer, EmployeeCommissionPlanSerializer,
 )
-from .permissions import IsOwnerOrBusinessOwner
+from .permissions import CanManageInventory, IsOwnerOrBusinessOwner
 
 
 COMMISSION_MANAGEMENT_ROLES = (
@@ -1299,6 +1303,68 @@ class ProductViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     ordering = ["-created_at"]
 
     pagination_class = StandardResultsSetPagination
+
+    @extend_schema(
+        tags=["Products"],
+        operation_id="api_products_adjust_stock_create",
+        summary="Ajustar stock de un producto",
+        description=(
+            "Aplica un delta firmado al stock de un producto Activo y "
+            "registra el movimiento de inventario de forma atómica."
+        ),
+        request=ProductStockAdjustmentSerializer,
+        responses={
+            201: ProductStockAdjustmentResponseSerializer,
+            400: ProductStockAdjustmentValidationErrorSerializer,
+            401: DetailErrorResponseSerializer,
+            403: DetailErrorResponseSerializer,
+            404: DetailErrorResponseSerializer,
+        },
+    )
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="adjust-stock",
+        url_name="adjust-stock",
+        permission_classes=[
+            IsAuthenticated,
+            CanManageInventory,
+        ],
+    )
+    def adjust_stock(self, request, *args, **kwargs):
+        product = self.get_object()
+        self._validate_business_access(
+            product.business,
+            allowed_roles=self.update_allowed_roles,
+        )
+
+        request_serializer = (
+            ProductStockAdjustmentSerializer(
+                data=request.data,
+            )
+        )
+        request_serializer.is_valid(raise_exception=True)
+
+        with db_tx.atomic():
+            result = adjust_product_stock(
+                product_id=product.pk,
+                business_id=product.business_id,
+                quantity=request_serializer.validated_data[
+                    "quantity"
+                ],
+                note=request_serializer.validated_data["note"],
+                created_by=request.user,
+            )
+            response_data = (
+                ProductStockAdjustmentResponseSerializer(
+                    result
+                ).data
+            )
+
+        return Response(
+            response_data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 @extend_schema_view(

@@ -514,6 +514,37 @@ class ProductSerializer(
 
         return attrs
 
+
+class ProductStockAdjustmentSerializer(
+    serializers.Serializer,
+):
+    quantity = serializers.IntegerField()
+    note = serializers.CharField(
+        max_length=255,
+        allow_blank=False,
+        trim_whitespace=True,
+    )
+
+    def to_internal_value(self, data):
+        if hasattr(data, "keys"):
+            unexpected_fields = set(data.keys()) - set(self.fields)
+            if unexpected_fields:
+                raise serializers.ValidationError({
+                    field: "Este campo no está permitido."
+                    for field in sorted(unexpected_fields)
+                })
+
+        return super().to_internal_value(data)
+
+    def validate_quantity(self, value):
+        if value == 0:
+            raise serializers.ValidationError(
+                "La cantidad debe ser distinta de cero."
+            )
+
+        return value
+
+
 class PublicProductCategorySerializer(
     serializers.ModelSerializer,
 ):
@@ -3387,6 +3418,37 @@ class StockMovementSerializer(serializers.ModelSerializer):
             "is_reversal",
         )
         read_only_fields = fields
+
+
+class ProductStockAdjustmentResponseSerializer(
+    serializers.Serializer,
+):
+    previous_stock = serializers.IntegerField(
+        read_only=True,
+    )
+    new_stock = serializers.IntegerField(
+        read_only=True,
+    )
+    movement = StockMovementSerializer(
+        read_only=True,
+    )
+
+
+class ProductStockAdjustmentValidationErrorSerializer(
+    serializers.Serializer,
+):
+    quantity = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+    )
+    note = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+    )
+    product = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+    )
 
 class PaymentSummaryQuerySerializer(
     serializers.Serializer
