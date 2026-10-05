@@ -2,7 +2,7 @@ from concurrent.futures import (
     ThreadPoolExecutor,
     TimeoutError as FutureTimeoutError,
 )
-from threading import Event
+from threading import Barrier, Event
 from unittest.mock import patch
 
 from django.db import close_old_connections
@@ -13,7 +13,10 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from core.models import BusinessMembership, Product, StockMovement
-from core.services.inventory import record_locked_stock_movement
+from core.services.inventory import (
+    adjust_product_stock,
+    record_locked_stock_movement,
+)
 from core.tests.base import BusinessIsolationTestCase
 from core.tests.factories import (
     create_business,
@@ -175,6 +178,90 @@ class ProductStockAdjustmentTests(BusinessIsolationTestCase):
                 self.assertEqual(self.product.stock, 10)
                 self.assertFalse(StockMovement.objects.exists())
 
+    def test_boolean_true_quantity_is_rejected_without_effects(self):
+        response = self.client.post(
+            self.endpoint(),
+            {"quantity": True, "note": "Motivo"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("quantity", response.data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)
+        self.assertFalse(StockMovement.objects.exists())
+
+    def test_boolean_false_quantity_is_rejected_without_effects(self):
+        response = self.client.post(
+            self.endpoint(),
+            {"quantity": False, "note": "Motivo"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("quantity", response.data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)
+        self.assertFalse(StockMovement.objects.exists())
+
+    def test_note_is_trimmed_in_response_and_persisted_movement(self):
+        response = self.post_adjustment(
+            quantity=1,
+            note="  Conteo físico  ",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["previous_stock"], 10)
+        self.assertEqual(response.data["new_stock"], 11)
+        self.assertEqual(response.data["movement"]["note"], "Conteo físico")
+        movement = StockMovement.objects.get(product=self.product)
+        self.assertEqual(movement.note, "Conteo físico")
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 11)
+        self.assertEqual(
+            StockMovement.objects.filter(product=self.product).count(),
+            1,
+        )
+
+    def test_note_with_exactly_255_characters_is_accepted(self):
+        note = "x" * 255
+        response = self.post_adjustment(quantity=1, note=note)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["movement"]["note"], note)
+        movement = StockMovement.objects.get(product=self.product)
+        self.assertEqual(movement.note, note)
+
+    def test_note_with_256_characters_is_rejected_without_effects(self):
+        response = self.post_adjustment(quantity=1, note="x" * 256)
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("note", response.data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)
+        self.assertFalse(StockMovement.objects.exists())
+
+    def test_product_and_movement_unknown_fields_are_rejected_exactly(self):
+        for field, value in (("product", "valor"), ("movement", {})):
+            with self.subTest(field=field):
+                response = self.client.post(
+                    self.endpoint(),
+                    {"quantity": 1, "note": "Motivo", field: value},
+                    format="json",
+                )
+
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_400_BAD_REQUEST,
+                )
+                self.assertEqual(
+                    response.data[field],
+                    "Este campo no está permitido.",
+                )
+                self.product.refresh_from_db()
+                self.assertEqual(self.product.stock, 10)
+                self.assertFalse(StockMovement.objects.exists())
+
     def test_unknown_and_server_controlled_fields_are_rejected(self):
         forbidden_fields = (
             "business_public_id",
@@ -330,6 +417,19 @@ class ProductStockAdjustmentTests(BusinessIsolationTestCase):
             operation["operationId"],
             "api_products_adjust_stock_create",
         )
+        self.assertEqual(
+            operation["security"],
+            [{"BearerAuth": []}, {"BearerAuth": []}],
+        )
+        self.assertEqual(
+            operation["parameters"],
+            [{
+                "in": "path",
+                "name": "public_id",
+                "schema": {"type": "string", "format": "uuid"},
+                "required": True,
+            }],
+        )
         self.assertEqual(set(operation["responses"]), {"201", "400", "401", "403", "404"})
         request_ref = operation["requestBody"]["content"]["application/json"]["schema"]["$ref"]
         request_schema = schema["components"]["schemas"][request_ref.rsplit("/", 1)[-1]]
@@ -344,6 +444,29 @@ class ProductStockAdjustmentTests(BusinessIsolationTestCase):
         )
         movement_ref = response_schema["properties"]["movement"]["allOf"][0]["$ref"]
         self.assertEqual(movement_ref, "#/components/schemas/StockMovement")
+
+        error_ref = operation["responses"]["400"]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+        error_schema = schema["components"]["schemas"][
+            error_ref.rsplit("/", 1)[-1]
+        ]
+        self.assertEqual(
+            set(error_schema["properties"]),
+            {"quantity", "note", "product", "non_field_errors"},
+        )
+        for field in ("quantity", "note", "product", "non_field_errors"):
+            self.assertEqual(
+                error_schema["properties"][field],
+                {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            )
+        self.assertEqual(
+            error_schema["additionalProperties"],
+            {"type": "string"},
+        )
 
 
 class ProductStockAdjustmentConcurrencyTests(TransactionTestCase):
@@ -407,6 +530,43 @@ class ProductStockAdjustmentConcurrencyTests(TransactionTestCase):
             return response.status_code, getattr(response, "data", None)
         finally:
             close_old_connections()
+
+    def _request_concurrent_adjustment(self, quantity):
+        close_old_connections()
+        try:
+            client = APIClient()
+            client.force_authenticate(
+                user=type(self.owner).objects.get(pk=self.owner.pk)
+            )
+            response = client.post(
+                self.endpoint(),
+                {"quantity": quantity, "note": "Ajuste concurrente"},
+                format="json",
+            )
+            return response.status_code, getattr(response, "data", None)
+        finally:
+            close_old_connections()
+
+    def _run_concurrent_adjustments(self, *quantities):
+        service_barrier = Barrier(len(quantities))
+
+        def synchronized_adjust_product_stock(**kwargs):
+            service_barrier.wait(timeout=10)
+            return adjust_product_stock(**kwargs)
+
+        with patch(
+            "core.views.adjust_product_stock",
+            side_effect=synchronized_adjust_product_stock,
+        ):
+            with ThreadPoolExecutor(max_workers=len(quantities)) as executor:
+                futures = [
+                    executor.submit(
+                        self._request_concurrent_adjustment,
+                        quantity,
+                    )
+                    for quantity in quantities
+                ]
+                return [future.result(timeout=15) for future in futures]
 
     def _hold_product_lock_and_adjust(self, quantity, lock_held, release_lock):
         close_old_connections()
@@ -534,6 +694,93 @@ class ProductStockAdjustmentConcurrencyTests(TransactionTestCase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 15)
         self.assertEqual(StockMovement.objects.filter(product=self.product).count(), 2)
+
+    def test_two_valid_concurrent_manual_decreases_are_serializable(self):
+        results = self._run_concurrent_adjustments(-3, -2)
+
+        self.assertEqual(
+            [response_status for response_status, _ in results],
+            [status.HTTP_201_CREATED, status.HTTP_201_CREATED],
+        )
+        transitions = {
+            data["movement"]["quantity"]: (
+                data["previous_stock"],
+                data["new_stock"],
+            )
+            for _, data in results
+        }
+        self.assertIn(
+            transitions,
+            (
+                {-3: (10, 7), -2: (7, 5)},
+                {-2: (10, 8), -3: (8, 5)},
+            ),
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 5)
+        self.assertEqual(
+            sorted(
+                StockMovement.objects.filter(product=self.product)
+                .values_list("quantity", flat=True)
+            ),
+            [-3, -2],
+        )
+
+    def test_concurrent_manual_decreases_allow_only_one_oversell(self):
+        Product.objects.filter(pk=self.product.pk).update(stock=5)
+
+        results = self._run_concurrent_adjustments(-4, -4)
+
+        self.assertEqual(
+            sorted(response_status for response_status, _ in results),
+            [status.HTTP_201_CREATED, status.HTTP_400_BAD_REQUEST],
+        )
+        rejected_data = next(
+            data
+            for response_status, data in results
+            if response_status == status.HTTP_400_BAD_REQUEST
+        )
+        self.assertIn("quantity", rejected_data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 1)
+        self.assertEqual(
+            list(
+                StockMovement.objects.filter(product=self.product)
+                .values_list("quantity", flat=True)
+            ),
+            [-4],
+        )
+
+    def test_concurrent_manual_increase_and_decrease_are_serializable(self):
+        results = self._run_concurrent_adjustments(5, -3)
+
+        self.assertEqual(
+            [response_status for response_status, _ in results],
+            [status.HTTP_201_CREATED, status.HTTP_201_CREATED],
+        )
+        transitions = {
+            data["movement"]["quantity"]: (
+                data["previous_stock"],
+                data["new_stock"],
+            )
+            for _, data in results
+        }
+        self.assertIn(
+            transitions,
+            (
+                {5: (10, 15), -3: (15, 12)},
+                {-3: (10, 7), 5: (7, 12)},
+            ),
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 12)
+        self.assertEqual(
+            sorted(
+                StockMovement.objects.filter(product=self.product)
+                .values_list("quantity", flat=True)
+            ),
+            [-3, 5],
+        )
 
     def test_negative_adjustment_vs_sale_cannot_oversell(self):
         Product.objects.filter(pk=self.product.pk).update(stock=5)

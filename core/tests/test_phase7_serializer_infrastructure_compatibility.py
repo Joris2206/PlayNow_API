@@ -33,7 +33,7 @@ from core.tests.factories import (
 
 
 EXPECTED_OPENAPI_SHA256 = (
-    "0b6b5e1ecd3fe40ef2683423a39be88fa85d5a22335925a813bb513bd01b47dd"
+    "4e846dab089b7cd2ecc559d7a48bf42e71fddda9e0f04e29dc65f047b4de060a"
 )
 
 CANONICAL_LOCATIONS = {

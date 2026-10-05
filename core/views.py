@@ -16,6 +16,7 @@ from drf_spectacular.utils import (
     extend_schema,
     extend_schema_view,
 )
+from drf_spectacular.extensions import OpenApiSerializerExtension
 from django_filters import rest_framework as filters
 from core.services.customer_supplier_reports import build_customers_summary, build_suppliers_summary
 from core.services.commissions import (
@@ -183,6 +184,31 @@ from .serializers import (
     CommissionSettlementCreateSerializer, CommissionSettlementSerializer, EmployeeCommissionPlanSerializer,
 )
 from .permissions import CanManageInventory, IsOwnerOrBusinessOwner
+
+
+class ProductStockAdjustmentValidationErrorSchemaExtension(
+    OpenApiSerializerExtension,
+):
+    """Describe known and dynamic adjustment validation errors."""
+
+    target_class = ProductStockAdjustmentValidationErrorSerializer
+
+    def map_serializer(self, auto_schema, direction):
+        string_error_list = {
+            "type": "array",
+            "items": {"type": "string"},
+        }
+
+        return {
+            "type": "object",
+            "properties": {
+                "quantity": string_error_list,
+                "note": string_error_list,
+                "product": string_error_list,
+                "non_field_errors": string_error_list,
+            },
+            "additionalProperties": {"type": "string"},
+        }
 
 
 COMMISSION_MANAGEMENT_ROLES = (
