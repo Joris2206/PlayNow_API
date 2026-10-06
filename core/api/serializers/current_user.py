@@ -19,6 +19,9 @@ class CurrentUserSerializer(
     public_id = serializers.UUIDField()
     email = serializers.EmailField()
     full_name = serializers.CharField()
+    is_superuser = serializers.BooleanField(
+        read_only=True,
+    )
 
     memberships = CurrentMembershipSerializer(
         many=True
