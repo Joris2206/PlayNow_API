@@ -60,6 +60,15 @@ from core.api.serializers.auth import (
 )
 
 # ---------- Usuarios ----------
+NON_OWNER_ROLE_CHOICES = [
+    (BusinessMembership.ROLE_ADMIN, "Administrador"),
+    (BusinessMembership.ROLE_CASHIER, "Cajero"),
+    (BusinessMembership.ROLE_SELLER, "Vendedor"),
+    (BusinessMembership.ROLE_INVENTORY, "Inventario"),
+    (BusinessMembership.ROLE_VIEWER, "Solo lectura"),
+]
+
+
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
@@ -248,32 +257,24 @@ class BusinessMembershipSerializer(serializers.ModelSerializer):
         )
         read_only_fields = fields
 
+class StrictFieldsSerializerMixin:
+    def to_internal_value(self, data):
+        if hasattr(data, "keys"):
+            unknown = set(data.keys()) - set(self.fields.keys())
+            if unknown:
+                raise serializers.ValidationError({
+                    field: "Este campo no está permitido."
+                    for field in sorted(unknown)
+                })
+        return super().to_internal_value(data)
+
+
 class BusinessMembershipUpdateSerializer(
-    serializers.ModelSerializer
+    StrictFieldsSerializerMixin,
+    serializers.ModelSerializer,
 ):
     role = serializers.ChoiceField(
-        choices=[
-            (
-                BusinessMembership.ROLE_ADMIN,
-                "Administrador",
-            ),
-            (
-                BusinessMembership.ROLE_CASHIER,
-                "Cajero",
-            ),
-            (
-                BusinessMembership.ROLE_SELLER,
-                "Vendedor",
-            ),
-            (
-                BusinessMembership.ROLE_INVENTORY,
-                "Inventario",
-            ),
-            (
-                BusinessMembership.ROLE_VIEWER,
-                "Solo lectura",
-            ),
-        ],
+        choices=NON_OWNER_ROLE_CHOICES,
         required=False,
     )
 
@@ -295,90 +296,39 @@ class BusinessMembershipUpdateSerializer(
                 "Debe proporcionar al menos un campo "
                 "para actualizar."
             )
-
-        request = self.context.get("request")
-        membership = self.instance
-
-        if request is None:
-            raise serializers.ValidationError(
-                "No se encontró el contexto de la solicitud."
-            )
-
-        current_user = request.user
-
-        if membership.user_id == current_user.id:
-            raise serializers.ValidationError(
-                "No puedes modificar tu propia membresía."
-            )
-
-        current_membership = (
-            BusinessMembership.objects
-            .filter(
-                user=current_user,
-                business=membership.business,
-                is_active=True,
-            )
-            .first()
-        )
-
-        if (
-            not current_user.is_superuser
-            and current_membership is None
-        ):
-            raise serializers.ValidationError(
-                "No tienes una membresía activa "
-                "en este negocio."
-            )
-
-        if (
-            not current_user.is_superuser
-            and current_membership.role
-            not in {
-                BusinessMembership.ROLE_OWNER,
-                BusinessMembership.ROLE_ADMIN,
-            }
-        ):
-            raise serializers.ValidationError(
-                "No tienes permiso para administrar "
-                "membresías."
-            )
-
-        if (
-            membership.role
-            == BusinessMembership.ROLE_OWNER
-            and not current_user.is_superuser
-        ):
-            raise serializers.ValidationError(
-                "La membresía del propietario no puede "
-                "modificarse desde este endpoint."
-            )
-
-        requested_role = attrs.get("role")
-
-        if (
-            requested_role
-            == BusinessMembership.ROLE_OWNER
-        ):
-            raise serializers.ValidationError({
-                "role": (
-                    "No se puede asignar el rol de "
-                    "propietario desde este endpoint."
-                )
-            })
-
-        if (
-            not current_user.is_superuser
-            and current_membership.role
-            == BusinessMembership.ROLE_ADMIN
-            and membership.role
-            == BusinessMembership.ROLE_ADMIN
-        ):
-            raise serializers.ValidationError(
-                "Un administrador no puede modificar "
-                "a otro administrador."
-            )
-
         return attrs
+
+
+class OwnerPromotionSerializer(
+    StrictFieldsSerializerMixin,
+    serializers.Serializer,
+):
+    membership_public_id = serializers.UUIDField()
+
+
+class OwnershipTransferSerializer(
+    StrictFieldsSerializerMixin,
+    serializers.Serializer,
+):
+    from_membership_public_id = serializers.UUIDField()
+    to_membership_public_id = serializers.UUIDField()
+    from_role = serializers.ChoiceField(
+        choices=NON_OWNER_ROLE_CHOICES,
+    )
+
+
+class OwnerRemovalSerializer(
+    StrictFieldsSerializerMixin,
+    serializers.Serializer,
+):
+    replacement_role = serializers.ChoiceField(
+        choices=NON_OWNER_ROLE_CHOICES,
+    )
+
+
+class OwnershipTransferResponseSerializer(serializers.Serializer):
+    from_membership = BusinessMembershipSerializer()
+    to_membership = BusinessMembershipSerializer()
 
 # ---------- Productos ----------
 class ProductCategorySerializer(

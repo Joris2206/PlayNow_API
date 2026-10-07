@@ -77,6 +77,11 @@ ROUTER_REGISTRY = (
     ("statuses", "EntityStatusViewSet", "entity-status"),
     ("payment-methods", "PaymentMethodViewSet", "payment-method"),
     ("businesses", "BusinessViewSet", "business"),
+    (
+        "business-memberships",
+        "BusinessMembershipViewSet",
+        "business-membership",
+    ),
     ("categories", "ProductCategoryViewSet", "product-category"),
     ("products", "ProductViewSet", "product"),
     ("employees", "EmployeeViewSet", "employee"),
@@ -117,6 +122,12 @@ ROUTER_ROUTE_CASES = (
         {"public_id": EXAMPLE_PUBLIC_ID},
         f"/api/businesses/{EXAMPLE_PUBLIC_ID}/",
         "BusinessViewSet",
+    ),
+    (
+        "business-membership-detail",
+        {"membership_public_id": EXAMPLE_PUBLIC_ID},
+        f"/api/business-memberships/{EXAMPLE_PUBLIC_ID}/",
+        "BusinessMembershipViewSet",
     ),
     ("product-list", None, "/api/products/", "ProductViewSet"),
     (
@@ -321,8 +332,8 @@ class PhaseThreeStructuralCompatibilityTests(SimpleTestCase):
         patterns = self._flatten_url_patterns(get_resolver().url_patterns)
         self.assertEqual(
             len(patterns),
-            298,
-            msg="The total URL pattern count changed from the Phase 3 baseline.",
+            304,
+            msg="The total URL pattern count changed from the Phase 1 baseline.",
         )
 
     def _flatten_url_patterns(self, patterns):

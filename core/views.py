@@ -6,7 +6,7 @@ from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError, PermissionDenied
+from rest_framework.exceptions import APIException, NotFound, ValidationError, PermissionDenied
 from rest_framework.generics import GenericAPIView
 from drf_spectacular.utils import (
     OpenApiExample,
@@ -41,6 +41,15 @@ from core.services.financial_flows import (
 from core.services.monthly_summary import build_monthly_summary
 from core.services.payment_debt_reports import build_debts_summary, build_payments_summary
 from core.services.transaction_cancellation import cancel_transaction
+from core.services.business_memberships import (
+    MembershipDomainError,
+    deactivate_membership_by_public_id,
+    deactivate_membership_in_business_by_public_id,
+    promote_to_owner_by_public_id,
+    remove_owner_by_public_id,
+    transfer_ownership_by_public_id,
+    update_membership_by_public_id,
+)
 from .filters import (
     DebtFilter,
     DebtPaymentFilter,
@@ -81,6 +90,10 @@ from .serializers import (
     DebtSummaryResponseSerializer,
     DebtSummaryQuerySerializer,
     EmployeeAccessCreateSerializer,
+    OwnerPromotionSerializer,
+    OwnerRemovalSerializer,
+    OwnershipTransferResponseSerializer,
+    OwnershipTransferSerializer,
     InventorySummaryQuerySerializer,
     MonthlyClosureCreateSerializer,
     MonthlyClosureReopenSerializer,
@@ -184,6 +197,69 @@ from .serializers import (
     CommissionSettlementCreateSerializer, CommissionSettlementSerializer, EmployeeCommissionPlanSerializer,
 )
 from .permissions import CanManageInventory, IsOwnerOrBusinessOwner
+
+
+class MembershipConflict(APIException):
+    status_code = status.HTTP_409_CONFLICT
+    default_code = "membership_conflict"
+
+
+def _raise_membership_domain_error(exc):
+    if exc.kind == "forbidden":
+        raise PermissionDenied(exc.detail)
+    if exc.kind == "not_found":
+        raise NotFound(exc.detail)
+    if exc.kind == "conflict":
+        raise MembershipConflict(exc.detail)
+    raise ValidationError(exc.detail)
+
+
+def _update_membership_response(*, request, membership_public_id):
+    def validate_changes(membership):
+        serializer = BusinessMembershipUpdateSerializer(
+            membership,
+            data=request.data,
+            partial=True,
+            context={"request": request},
+        )
+        serializer.is_valid(raise_exception=True)
+        return serializer.validated_data
+
+    try:
+        updated = update_membership_by_public_id(
+            actor=request.user,
+            membership_public_id=membership_public_id,
+            validate_changes=validate_changes,
+        )
+    except MembershipDomainError as exc:
+        _raise_membership_domain_error(exc)
+    log_action(
+        request.user,
+        "UPDATE_MEMBER_ACCESS",
+        updated.__class__.__name__,
+        updated.pk,
+    )
+    return Response(
+        BusinessMembershipSerializer(updated, context={"request": request}).data,
+        status=status.HTTP_200_OK,
+    )
+
+
+def _deactivate_membership_response(*, request, membership_public_id):
+    try:
+        updated = deactivate_membership_by_public_id(
+            actor=request.user,
+            membership_public_id=membership_public_id,
+        )
+    except MembershipDomainError as exc:
+        _raise_membership_domain_error(exc)
+    log_action(
+        request.user,
+        "DEACTIVATE_MEMBER_ACCESS",
+        updated.__class__.__name__,
+        updated.pk,
+    )
+    return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ProductStockAdjustmentValidationErrorSchemaExtension(
@@ -579,6 +655,69 @@ def decimal_or_zero(value):
 
 # -------- ViewSets --------
 @extend_schema_view(
+    partial_update=extend_schema(
+        tags=["Business Access"],
+        summary="Actualizar una membership",
+        request=BusinessMembershipUpdateSerializer,
+        responses={
+            200: BusinessMembershipSerializer,
+            400: OpenApiResponse(description="Payload o transición inválida."),
+            401: OpenApiResponse(description="Autenticación requerida."),
+            403: OpenApiResponse(description="Operación no autorizada."),
+            404: OpenApiResponse(description="Membership no visible."),
+            409: OpenApiResponse(description="Conflicto de ownership concurrente."),
+        },
+    ),
+    destroy=extend_schema(
+        tags=["Business Access"],
+        summary="Retirar lógicamente una membership",
+        responses={
+            204: None,
+            401: OpenApiResponse(description="Autenticación requerida."),
+            403: OpenApiResponse(description="Operación no autorizada."),
+            404: OpenApiResponse(description="Membership no visible."),
+            409: OpenApiResponse(description="Conflicto de ownership concurrente."),
+        },
+    ),
+)
+class BusinessMembershipViewSet(viewsets.GenericViewSet):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "admin_write"
+    lookup_field = "public_id"
+    lookup_url_kwarg = "membership_public_id"
+    http_method_names = ["patch", "delete", "head", "options"]
+
+    def get_queryset(self):
+        queryset = BusinessMembership.objects.select_related(
+            "user",
+            "employee",
+            "business",
+        )
+        user = self.request.user
+        if not user.is_authenticated:
+            return queryset.none()
+        if user.is_superuser:
+            return queryset
+        return queryset.filter(
+            business__memberships__user=user,
+            business__memberships__is_active=True,
+        ).distinct()
+
+    def partial_update(self, request, *args, **kwargs):
+        return _update_membership_response(
+            request=request,
+            membership_public_id=kwargs[self.lookup_url_kwarg],
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        return _deactivate_membership_response(
+            request=request,
+            membership_public_id=kwargs[self.lookup_url_kwarg],
+        )
+
+
+@extend_schema_view(
     list=extend_schema(
         tags=["Businesses"],
         summary="Listar negocios",
@@ -901,88 +1040,142 @@ class BusinessViewSet(
         )
 
     @extend_schema(
-        tags=["Business Access"],
-        summary="Actualizar acceso de un miembro",
-        description=(
-            "Permite cambiar el rol o activar/desactivar "
-            "la membresía de un trabajador. No permite "
-            "modificar al propietario ni asignar el rol owner."
-        ),
-        request=BusinessMembershipUpdateSerializer,
+        tags=["Business Ownership"],
+        summary="Promover una membership existente a owner",
+        request=OwnerPromotionSerializer,
         responses={
             200: BusinessMembershipSerializer,
+            400: OpenApiResponse(description="Payload o transición inválida."),
+            401: OpenApiResponse(description="Autenticación requerida."),
+            403: OpenApiResponse(description="Operación no autorizada."),
+            404: OpenApiResponse(description="Business o membership no visible."),
+            409: OpenApiResponse(description="Conflicto concurrente."),
         },
-        examples=[MEMBERSHIP_UPDATE_EXAMPLE],
     )
+    @action(detail=True, methods=["post"], url_path="owners")
+    def promote_owner(self, request, public_id=None):
+        serializer = OwnerPromotionSerializer(data=request.data)
 
+        def validate_payload():
+            serializer.is_valid(raise_exception=True)
+            return serializer.validated_data
+
+        try:
+            updated = promote_to_owner_by_public_id(
+                actor=request.user,
+                business_public_id=public_id,
+                candidate_membership_public_id=request.data.get(
+                    "membership_public_id"
+                ),
+                validate_payload=validate_payload,
+            )
+        except MembershipDomainError as exc:
+            _raise_membership_domain_error(exc)
+        log_action(
+            request.user,
+            "PROMOTE_BUSINESS_OWNER",
+            updated.__class__.__name__,
+            updated.pk,
+        )
+        return Response(
+            BusinessMembershipSerializer(updated, context={"request": request}).data,
+            status=status.HTTP_200_OK,
+        )
+
+    @extend_schema(
+        tags=["Business Ownership"],
+        summary="Transferir ownership atómicamente",
+        request=OwnershipTransferSerializer,
+        responses={
+            200: OwnershipTransferResponseSerializer,
+            400: OpenApiResponse(description="Payload o transición inválida."),
+            401: OpenApiResponse(description="Autenticación requerida."),
+            403: OpenApiResponse(description="Operación no autorizada."),
+            404: OpenApiResponse(description="Business o membership no visible."),
+            409: OpenApiResponse(description="Conflicto concurrente."),
+        },
+    )
+    @action(detail=True, methods=["post"], url_path="ownership-transfer")
+    def ownership_transfer(self, request, public_id=None):
+        serializer = OwnershipTransferSerializer(data=request.data)
+
+        def validate_payload():
+            serializer.is_valid(raise_exception=True)
+            return serializer.validated_data
+
+        try:
+            source, target = transfer_ownership_by_public_id(
+                actor=request.user,
+                business_public_id=public_id,
+                candidate_membership_public_ids=[
+                    request.data.get("from_membership_public_id"),
+                    request.data.get("to_membership_public_id"),
+                ],
+                validate_payload=validate_payload,
+            )
+        except MembershipDomainError as exc:
+            _raise_membership_domain_error(exc)
+        log_action(
+            request.user,
+            "TRANSFER_BUSINESS_OWNERSHIP",
+            source.__class__.__name__,
+            source.pk,
+            extra={"to_membership_id": target.pk},
+        )
+        response_serializer = OwnershipTransferResponseSerializer({
+            "from_membership": source,
+            "to_membership": target,
+        }, context={"request": request})
+        return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        tags=["Business Ownership"],
+        summary="Retirar un owner adicional conservando su acceso",
+        request=OwnerRemovalSerializer,
+        responses={
+            200: BusinessMembershipSerializer,
+            400: OpenApiResponse(description="Payload o transición inválida."),
+            401: OpenApiResponse(description="Autenticación requerida."),
+            403: OpenApiResponse(description="Operación no autorizada."),
+            404: OpenApiResponse(description="Business o membership no visible."),
+            409: OpenApiResponse(description="Último owner o conflicto concurrente."),
+        },
+    )
     @action(
         detail=True,
-        methods=["patch"],
-        url_path=(
-            r"members/"
-            r"(?P<membership_public_id>"
-            r"[0-9a-fA-F-]{36})"
-        ),
+        methods=["post"],
+        url_path=r"owners/(?P<membership_public_id>[0-9a-fA-F-]{36})/remove",
     )
-    def update_member(
+    def remove_business_owner(
         self,
         request,
         public_id=None,
         membership_public_id=None,
     ):
-        business = self.get_object()
+        serializer = OwnerRemovalSerializer(data=request.data)
 
-        self._validate_management_access(
-            business
-        )
+        def validate_payload():
+            serializer.is_valid(raise_exception=True)
+            return serializer.validated_data
 
-        membership = get_object_or_404(
-            BusinessMembership.objects
-            .select_related(
-                "user",
-                "employee",
-                "business",
-            ),
-            public_id=membership_public_id,
-            business=business,
-        )
-
-        serializer = (
-            BusinessMembershipUpdateSerializer(
-                membership,
-                data=request.data,
-                partial=True,
-                context={
-                    "request": request,
-                    "business": business,
-                },
+        try:
+            updated = remove_owner_by_public_id(
+                actor=request.user,
+                business_public_id=public_id,
+                membership_public_id=membership_public_id,
+                validate_payload=validate_payload,
             )
-        )
-
-        serializer.is_valid(
-            raise_exception=True
-        )
-
-        updated_membership = serializer.save()
-
+        except MembershipDomainError as exc:
+            _raise_membership_domain_error(exc)
         log_action(
             request.user,
-            "UPDATE_MEMBER_ACCESS",
-            updated_membership.__class__.__name__,
-            updated_membership.pk,
+            "REMOVE_BUSINESS_OWNER",
+            updated.__class__.__name__,
+            updated.pk,
+            extra={"replacement_role": updated.role},
         )
-
-        response_serializer = (
-            BusinessMembershipSerializer(
-                updated_membership,
-                context={
-                    "request": request,
-                },
-            )
-        )
-
         return Response(
-            response_serializer.data,
+            BusinessMembershipSerializer(updated, context={"request": request}).data,
             status=status.HTTP_200_OK,
         )
 
@@ -1013,84 +1206,21 @@ class BusinessViewSet(
         public_id=None,
         membership_public_id=None,
     ):
-        business = self.get_object()
-
-        self._validate_management_access(
-            business
-        )
-
-        membership = get_object_or_404(
-            BusinessMembership.objects
-            .select_related(
-                "user",
-                "employee",
-                "business",
-            ),
-            public_id=membership_public_id,
-            business=business,
-        )
-
-        if membership.user_id == request.user.id:
-            raise PermissionDenied(
-                "No puedes desactivar tu propio acceso."
+        try:
+            updated = deactivate_membership_in_business_by_public_id(
+                actor=request.user,
+                business_public_id=public_id,
+                membership_public_id=membership_public_id,
             )
-
-        if (
-            membership.role
-            == BusinessMembership.ROLE_OWNER
-        ):
-            raise PermissionDenied(
-                "No se puede desactivar al propietario "
-                "del negocio."
-            )
-
-        requester_membership = (
-            BusinessMembership.objects
-            .filter(
-                user=request.user,
-                business=business,
-                is_active=True,
-            )
-            .first()
-        )
-
-        if (
-            not request.user.is_superuser
-            and requester_membership is not None
-            and requester_membership.role
-            == BusinessMembership.ROLE_ADMIN
-            and membership.role
-            == BusinessMembership.ROLE_ADMIN
-        ):
-            raise PermissionDenied(
-                "Un administrador no puede desactivar "
-                "a otro administrador."
-            )
-
-        if not membership.is_active:
-            return Response(
-                status=status.HTTP_204_NO_CONTENT,
-            )
-
-        membership.is_active = False
-
-        membership.save(
-            update_fields=[
-                "is_active",
-                "updated_at",
-            ]
-        )
-
+        except MembershipDomainError as exc:
+            _raise_membership_domain_error(exc)
         log_action(
             request.user,
             "DEACTIVATE_MEMBER_ACCESS",
-            membership.__class__.__name__,
-            membership.pk,
+            updated.__class__.__name__,
+            updated.pk,
         )
-
-        return Response(
-            status=status.HTTP_204_NO_CONTENT,
-        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 class PublicCatalogViewSet(
     viewsets.ReadOnlyModelViewSet,

@@ -2,7 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     CommissionSettlementViewSet, CurrentUserView, CustomerSummaryView, DebtSummaryView, InventorySummaryView, SupplierSummaryView, healthcheck, RegisterViewSet,
-    BusinessViewSet, EntityStatusViewSet,
+    BusinessMembershipViewSet, BusinessViewSet, EntityStatusViewSet,
     ProductCategoryViewSet, ProductViewSet,
     EmployeeViewSet, CustomerViewSet, SupplierViewSet, PaymentMethodViewSet,
     TransactionViewSet, DebtViewSet, DebtPaymentViewSet,
@@ -26,6 +26,11 @@ router.register(r'payment-methods', PaymentMethodViewSet, basename='payment-meth
 
 # negocio
 router.register(r'businesses', BusinessViewSet, basename='business')
+router.register(
+    r'business-memberships',
+    BusinessMembershipViewSet,
+    basename='business-membership',
+)
 
 # productos
 router.register(r'categories', ProductCategoryViewSet, basename='product-category')

@@ -205,6 +205,10 @@ SPECTACULAR_SETTINGS = {
     },
     "SWAGGER_UI_SETTINGS": {"persistAuthorization": True},
     "SERVERS": [{"url": API_BASE_URL, "description": "Current"}],
+    "ENUM_NAME_OVERRIDES": {
+        "BusinessMembershipRoleEnum": "core.models.BusinessMembership.ROLES",
+        "NonOwnerBusinessMembershipRoleEnum": "core.serializers.NON_OWNER_ROLE_CHOICES",
+    },
 }
 
 # -------------------------
