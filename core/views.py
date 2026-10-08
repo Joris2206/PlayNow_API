@@ -50,6 +50,10 @@ from core.services.business_memberships import (
     transfer_ownership_by_public_id,
     update_membership_by_public_id,
 )
+from core.services.business_provisioning import (
+    BusinessProvisioningError,
+    provision_business,
+)
 from .filters import (
     DebtFilter,
     DebtPaymentFilter,
@@ -90,6 +94,7 @@ from .serializers import (
     DebtSummaryResponseSerializer,
     DebtSummaryQuerySerializer,
     EmployeeAccessCreateSerializer,
+    BusinessCreateSerializer,
     OwnerPromotionSerializer,
     OwnerRemovalSerializer,
     OwnershipTransferResponseSerializer,
@@ -209,6 +214,14 @@ def _raise_membership_domain_error(exc):
         raise PermissionDenied(exc.detail)
     if exc.kind == "not_found":
         raise NotFound(exc.detail)
+    if exc.kind == "conflict":
+        raise MembershipConflict(exc.detail)
+    raise ValidationError(exc.detail)
+
+
+def _raise_business_provisioning_error(exc):
+    if exc.kind == "forbidden":
+        raise PermissionDenied(exc.detail)
     if exc.kind == "conflict":
         raise MembershipConflict(exc.detail)
     raise ValidationError(exc.detail)
@@ -730,9 +743,18 @@ class BusinessMembershipViewSet(viewsets.GenericViewSet):
         tags=["Businesses"],
         summary="Crear un negocio",
         description=(
-            "Registra un negocio y crea automáticamente la membresía "
-            "owner para el usuario autenticado."
+            "Un usuario normal crea el negocio y recibe su membership owner. "
+            "Un Platform Admin debe enviar initial_owner_email para asignar "
+            "un User activo existente como owner inicial."
         ),
+        request=BusinessCreateSerializer,
+        responses={
+            201: BusinessSerializer,
+            400: OpenApiResponse(description="Payload u owner inicial inválido."),
+            401: OpenApiResponse(description="Autenticación requerida."),
+            403: OpenApiResponse(description="Operación no autorizada."),
+            409: OpenApiResponse(description="Conflicto de provisioning."),
+        },
         examples=[BUSINESS_CREATE_EXAMPLE],
     ),
     update=extend_schema(
@@ -790,6 +812,11 @@ class BusinessViewSet(
     throttle_classes = [
         ScopedRateThrottle,
     ]
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return BusinessCreateSerializer
+        return BusinessSerializer
 
     def get_throttles(self):
         self.throttle_scope = (
@@ -859,21 +886,23 @@ class BusinessViewSet(
         self,
         serializer,
     ):
-        self._validate_business_creation_access()
-
-        business = serializer.save(
-            user=self.request.user,
+        validated_business_data = dict(serializer.validated_data)
+        initial_owner_email = validated_business_data.pop(
+            "initial_owner_email",
+            None,
         )
-
-        BusinessMembership.objects.create(
-            user=self.request.user,
-            business=business,
-            role=BusinessMembership.ROLE_OWNER,
-            is_active=True,
-        )
+        try:
+            business, _ = provision_business(
+                actor=self.request.user,
+                validated_business_data=validated_business_data,
+                initial_owner_email=initial_owner_email,
+            )
+        except BusinessProvisioningError as exc:
+            _raise_business_provisioning_error(exc)
+        serializer.instance = business
 
         log_action(
-            self.request.user,
+            business.user,
             "CREATE",
             business.__class__.__name__,
             business.pk,
@@ -905,20 +934,6 @@ class BusinessViewSet(
         self._validate_management_access(
             business
         )
-
-    def _validate_business_creation_access(self):
-        user = self.request.user
-
-        if user.is_superuser:
-            return
-
-        if user.role not in [
-            User.Roles.BUSINESS_OWNER,
-            User.Roles.BUSINESS_ADMIN,
-        ]:
-            raise PermissionDenied(
-                "Tu cuenta no tiene permiso para registrar negocios."
-            )
 
     @extend_schema(
         tags=["Business Access"],

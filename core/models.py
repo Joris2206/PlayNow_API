@@ -99,6 +99,14 @@ class User(AbstractBaseUser, PermissionsMixin):
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['full_name']
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                Lower("email"),
+                name="unique_user_email_ci",
+            ),
+        ]
+
     def __str__(self):
         return f"{self.full_name} <{self.email}>"
 

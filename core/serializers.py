@@ -269,6 +269,31 @@ class StrictFieldsSerializerMixin:
         return super().to_internal_value(data)
 
 
+class BusinessCreateSerializer(
+    StrictFieldsSerializerMixin,
+    BusinessSerializer,
+):
+    initial_owner_email = serializers.EmailField(
+        write_only=True,
+        required=False,
+        max_length=254,
+        help_text=(
+            "Obligatorio para Platform Admin. Debe corresponder exactamente "
+            "a un User activo existente. Los usuarios normales no deben enviarlo."
+        ),
+    )
+
+    class Meta(BusinessSerializer.Meta):
+        fields = (*BusinessSerializer.Meta.fields, "initial_owner_email")
+
+    def validate_initial_owner_email(self, value):
+        return value.strip().lower()
+
+    def validate(self, attrs):
+        attrs.setdefault("status", get_active_status())
+        return super().validate(attrs)
+
+
 class BusinessMembershipUpdateSerializer(
     StrictFieldsSerializerMixin,
     serializers.ModelSerializer,
