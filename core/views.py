@@ -43,6 +43,7 @@ from core.services.payment_debt_reports import build_debts_summary, build_paymen
 from core.services.transaction_cancellation import cancel_transaction
 from core.services.business_memberships import (
     MembershipDomainError,
+    add_existing_member,
     deactivate_membership_by_public_id,
     deactivate_membership_in_business_by_public_id,
     promote_to_owner_by_public_id,
@@ -55,9 +56,13 @@ from core.services.business_provisioning import (
     provision_business,
 )
 from .filters import (
+    BusinessMembershipFilter,
+    ConfiguredSearchFilter,
     DebtFilter,
     DebtPaymentFilter,
     StockMovementFilter,
+    PublicIdFilterBackend,
+    StableOrderingFilter,
     TransactionFilter,
 )
 from .pagination import StandardResultsSetPagination
@@ -70,15 +75,18 @@ from django.db.models import (
     Avg,
     Count,
     DecimalField,
+    Exists,
     ExpressionWrapper,
     F,
     Max,
+    OuterRef,
     Q,
     Sum,
 )
 from core.utils import log_action
 from rest_framework.throttling import ScopedRateThrottle
 from .serializers import (
+    BusinessMembershipListSerializer,
     BusinessMembershipSerializer,
     BusinessMembershipUpdateSerializer,
     CashMovementSerializer,
@@ -94,6 +102,7 @@ from .serializers import (
     DebtSummaryResponseSerializer,
     DebtSummaryQuerySerializer,
     EmployeeAccessCreateSerializer,
+    ExistingBusinessMemberCreateSerializer,
     BusinessCreateSerializer,
     OwnerPromotionSerializer,
     OwnerRemovalSerializer,
@@ -668,6 +677,19 @@ def decimal_or_zero(value):
 
 # -------- ViewSets --------
 @extend_schema_view(
+    list=extend_schema(
+        tags=["Business Access"],
+        summary="Listar memberships de un negocio",
+        parameters=[
+            OpenApiParameter(
+                "business_public_id",
+                OpenApiTypes.UUID,
+                OpenApiParameter.QUERY,
+                required=True,
+            ),
+        ],
+        responses={200: BusinessMembershipListSerializer(many=True)},
+    ),
     partial_update=extend_schema(
         tags=["Business Access"],
         summary="Actualizar una membership",
@@ -693,20 +715,64 @@ def decimal_or_zero(value):
         },
     ),
 )
-class BusinessMembershipViewSet(viewsets.GenericViewSet):
+class BusinessMembershipViewSet(
+    mixins.ListModelMixin,
+    viewsets.GenericViewSet,
+):
     permission_classes = [IsAuthenticated]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "admin_write"
     lookup_field = "public_id"
     lookup_url_kwarg = "membership_public_id"
-    http_method_names = ["patch", "delete", "head", "options"]
+    http_method_names = ["get", "patch", "delete", "head", "options"]
+    pagination_class = StandardResultsSetPagination
+    filterset_class = BusinessMembershipFilter
+    filter_backends = [
+        PublicIdFilterBackend,
+        ConfiguredSearchFilter,
+        StableOrderingFilter,
+    ]
+    search_fields = [
+        "user__email",
+        "user__full_name",
+        "employee__full_name",
+        "employee__position",
+    ]
+    ordering_fields = [
+        "created_at",
+        "updated_at",
+        "role",
+        "user_email",
+        "user_full_name",
+    ]
+    ordering = ["created_at", "pk"]
+
+    def get_serializer_class(self):
+        if self.action == "list":
+            return BusinessMembershipListSerializer
+        return BusinessMembershipSerializer
+
+    def get_throttles(self):
+        self.throttle_scope = (
+            "public_read" if self.action == "list" else "admin_write"
+        )
+        return super().get_throttles()
 
     def get_queryset(self):
         queryset = BusinessMembership.objects.select_related(
             "user",
             "employee",
+            "employee__status",
             "business",
+        ).annotate(
+            user_email=F("user__email"),
+            user_full_name=F("user__full_name"),
         )
+        if self.action == "list":
+            business_pk = getattr(self, "_authorized_business_pk", None)
+            if business_pk is None:
+                return queryset.none()
+            return queryset.filter(business_id=business_pk)
         user = self.request.user
         if not user.is_authenticated:
             return queryset.none()
@@ -716,6 +782,74 @@ class BusinessMembershipViewSet(viewsets.GenericViewSet):
             business__memberships__user=user,
             business__memberships__is_active=True,
         ).distinct()
+
+    def list(self, request, *args, **kwargs):
+        raw_business_public_id = request.query_params.get("business_public_id")
+        if not raw_business_public_id:
+            raise ValidationError({
+                "business_public_id": ["Este campo es obligatorio."]
+            })
+        try:
+            business_public_id = UUID(raw_business_public_id)
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValidationError({
+                "business_public_id": ["Introduzca un UUID vÃ¡lido."]
+            }) from exc
+
+        actor_id = request.user.pk
+        authorized_businesses = (
+            Business.objects.filter(public_id=business_public_id)
+            .annotate(
+                actor_is_platform_admin=Exists(
+                    User.objects.filter(
+                        pk=actor_id,
+                        is_active=True,
+                        is_superuser=True,
+                    )
+                ),
+                actor_can_manage=Exists(
+                    BusinessMembership.objects.filter(
+                        business_id=OuterRef("pk"),
+                        user_id=actor_id,
+                        user__is_active=True,
+                        is_active=True,
+                        role__in=[
+                            BusinessMembership.ROLE_OWNER,
+                            BusinessMembership.ROLE_ADMIN,
+                        ],
+                    )
+                ),
+                actor_has_active_membership=Exists(
+                    BusinessMembership.objects.filter(
+                        business_id=OuterRef("pk"),
+                        user_id=actor_id,
+                        user__is_active=True,
+                        is_active=True,
+                    )
+                ),
+            )
+            .filter(
+                Q(actor_is_platform_admin=True)
+                | Q(actor_has_active_membership=True)
+            )
+            .only("pk")
+        )
+        try:
+            authorized_business = authorized_businesses.get()
+        except Business.DoesNotExist as exc:
+            raise NotFound(
+                "El recurso solicitado no se encuentra disponible."
+            ) from exc
+        if not (
+            authorized_business.actor_is_platform_admin
+            or authorized_business.actor_can_manage
+        ):
+            raise PermissionDenied(
+                "Solo el propietario o un administrador puede administrar "
+                "los accesos de este negocio."
+            )
+        self._authorized_business_pk = authorized_business.pk
+        return super().list(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
         return _update_membership_response(
@@ -821,11 +955,12 @@ class BusinessViewSet(
     def get_throttles(self):
         self.throttle_scope = (
             "public_read"
-            if self.action
-            in (
-                "list",
-                "retrieve",
-                "members",
+            if (
+                self.action in ("list", "retrieve")
+                or (
+                    self.action == "members"
+                    and self.request.method == "GET"
+                )
             )
             else "admin_write"
         )
@@ -997,6 +1132,7 @@ class BusinessViewSet(
         )
 
     @extend_schema(
+        methods=["GET"],
         tags=["Business Access"],
         summary="Listar accesos del negocio",
         description=(
@@ -1010,9 +1146,24 @@ class BusinessViewSet(
             ),
         },
     )
+    @extend_schema(
+        methods=["POST"],
+        tags=["Business Access"],
+        summary="Agregar un User existente al negocio",
+        request=ExistingBusinessMemberCreateSerializer,
+        responses={
+            200: BusinessMembershipSerializer,
+            201: BusinessMembershipSerializer,
+            400: OpenApiResponse(description="Payload o User no elegible."),
+            401: OpenApiResponse(description="AutenticaciÃ³n requerida."),
+            403: OpenApiResponse(description="OperaciÃ³n no autorizada."),
+            404: OpenApiResponse(description="Business no visible."),
+            409: OpenApiResponse(description="Membership existente o owner protegido."),
+        },
+    )
     @action(
         detail=True,
-        methods=["get"],
+        methods=["get", "post"],
         url_path="members",
     )
     def members(
@@ -1020,6 +1171,39 @@ class BusinessViewSet(
         request,
         public_id=None,
     ):
+        if request.method == "POST":
+            payload = ExistingBusinessMemberCreateSerializer(data=request.data)
+            payload.is_valid(raise_exception=True)
+            try:
+                membership, created = add_existing_member(
+                    actor=request.user,
+                    business_public_id=public_id,
+                    **payload.validated_data,
+                )
+            except MembershipDomainError as exc:
+                _raise_membership_domain_error(exc)
+            log_action(
+                request.user,
+                (
+                    "ADD_EXISTING_BUSINESS_MEMBER"
+                    if created
+                    else "REACTIVATE_BUSINESS_MEMBER"
+                ),
+                membership.__class__.__name__,
+                membership.pk,
+            )
+            return Response(
+                BusinessMembershipSerializer(
+                    membership,
+                    context={"request": request},
+                ).data,
+                status=(
+                    status.HTTP_201_CREATED
+                    if created
+                    else status.HTTP_200_OK
+                ),
+            )
+
         business = self.get_object()
 
         self._validate_management_access(

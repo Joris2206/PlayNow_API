@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from django.db import transaction
+from django.db.models import Exists, OuterRef, Q
 
 from core.models import Business, BusinessMembership, User
 
@@ -221,6 +222,180 @@ def _validate_non_owner_role(*, field_name, value):
             {field_name: ["Debe seleccionar un rol distinto de owner."]},
             "invalid",
         )
+
+
+TARGET_EMAIL_ERROR = {
+    "email": ["No se pudo agregar una cuenta elegible con este correo."]
+}
+
+
+def _preauthorize_add_existing_member(*, actor_id, business_public_id):
+    """Reject unauthorized actors before resolving any target identity."""
+    visible_businesses = (
+        Business.objects.filter(public_id=business_public_id)
+        .annotate(
+            actor_is_platform_admin=Exists(
+                User.objects.filter(
+                    pk=actor_id,
+                    is_active=True,
+                    is_superuser=True,
+                )
+            ),
+            actor_can_manage=Exists(
+                BusinessMembership.objects.filter(
+                    business_id=OuterRef("pk"),
+                    user_id=actor_id,
+                    user__is_active=True,
+                    is_active=True,
+                    role__in=[
+                        BusinessMembership.ROLE_OWNER,
+                        BusinessMembership.ROLE_ADMIN,
+                    ],
+                )
+            ),
+            actor_has_active_membership=Exists(
+                BusinessMembership.objects.filter(
+                    business_id=OuterRef("pk"),
+                    user_id=actor_id,
+                    user__is_active=True,
+                    is_active=True,
+                )
+            ),
+        )
+        .filter(
+            Q(actor_is_platform_admin=True)
+            | Q(actor_has_active_membership=True)
+        )
+        .only("pk")
+    )
+    try:
+        visible_business = visible_businesses.get()
+    except (Business.DoesNotExist, ValueError) as exc:
+        raise MembershipDomainError(
+            "El recurso solicitado no se encuentra disponible.",
+            "not_found",
+        ) from exc
+    if not (
+        visible_business.actor_is_platform_admin
+        or visible_business.actor_can_manage
+    ):
+        raise MembershipDomainError(
+            "No tienes permiso para administrar membresÃ­as.",
+            "forbidden",
+        )
+
+
+@transaction.atomic
+def add_existing_member(*, actor, business_public_id, email, role):
+    """Create or reactivate a non-owner membership for an existing User."""
+    _validate_non_owner_role(field_name="role", value=role)
+    _preauthorize_add_existing_member(
+        actor_id=actor.pk,
+        business_public_id=business_public_id,
+    )
+
+    # The target is resolved only after the actor passes the DB-backed
+    # preflight. Eligibility is still authoritative only after row locks.
+    target_user_ids = list(
+        User.objects.filter(email__iexact=email).values_list("pk", flat=True)
+    )
+
+    business = _lock_business_by_public_id(business_public_id)
+    actor_membership_id = _actor_membership_id(
+        actor_id=actor.pk,
+        business=business,
+    )
+    target_membership_id = None
+    if len(target_user_ids) == 1:
+        target_membership_ids = list(
+            BusinessMembership.objects.filter(
+                business=business,
+                user_id=target_user_ids[0],
+            )
+            .values_list("pk", flat=True)
+        )
+        if target_membership_ids:
+            target_membership_id = target_membership_ids[0]
+
+    membership_ids = sorted({
+        membership_id
+        for membership_id in (actor_membership_id, target_membership_id)
+        if membership_id is not None
+    })
+    locked_memberships = list(
+        BusinessMembership.objects.select_for_update()
+        .filter(business=business, pk__in=membership_ids)
+        .order_by("pk")
+    )
+    memberships_by_id = {
+        membership.pk: membership for membership in locked_memberships
+    }
+
+    user_ids = sorted({actor.pk, *target_user_ids})
+    locked_users = list(
+        User.objects.select_for_update()
+        .filter(pk__in=user_ids)
+        .order_by("pk")
+    )
+    users_by_id = {user.pk: user for user in locked_users}
+    locked_actor = users_by_id.get(actor.pk)
+    actor_membership = memberships_by_id.get(actor_membership_id)
+    if locked_actor is None:
+        raise MembershipDomainError(
+            "El recurso solicitado no se encuentra disponible.",
+            "not_found",
+        )
+    _hide_missing_actor_access(
+        _authorize_management_actor,
+        locked_actor=locked_actor,
+        actor_membership=actor_membership,
+    )
+
+    if (
+        not locked_actor.is_superuser
+        and actor_membership.role == BusinessMembership.ROLE_ADMIN
+        and role not in LOWER_ROLES
+    ):
+        raise MembershipDomainError(
+            "Un administrador no puede escalar privilegios.",
+            "forbidden",
+        )
+
+    if len(target_user_ids) != 1:
+        raise MembershipDomainError(TARGET_EMAIL_ERROR, "invalid")
+    target_user = users_by_id.get(target_user_ids[0])
+    if (
+        target_user is None
+        or not target_user.is_active
+        or target_user.email.casefold() != email.casefold()
+    ):
+        raise MembershipDomainError(TARGET_EMAIL_ERROR, "invalid")
+
+    existing = memberships_by_id.get(target_membership_id)
+    if existing is not None:
+        if existing.role == BusinessMembership.ROLE_OWNER:
+            raise MembershipDomainError(
+                "Los owners solo pueden modificarse mediante las acciones de ownership.",
+                "conflict",
+            )
+        if existing.is_active:
+            raise MembershipDomainError(
+                "El User ya tiene acceso activo a este negocio.",
+                "conflict",
+            )
+        existing.role = role
+        existing.is_active = True
+        existing.save(update_fields=["role", "is_active", "updated_at"])
+        return existing, False
+
+    membership = BusinessMembership.objects.create(
+        business=business,
+        user=target_user,
+        employee=None,
+        role=role,
+        is_active=True,
+    )
+    return membership, True
 
 
 def effective_owner_count(*, business):

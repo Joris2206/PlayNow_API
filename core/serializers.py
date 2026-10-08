@@ -257,6 +257,70 @@ class BusinessMembershipSerializer(serializers.ModelSerializer):
         )
         read_only_fields = fields
 
+class BusinessMembershipListSerializer(serializers.ModelSerializer):
+    user_public_id = public_id_read_only(source="user")
+    user_email = serializers.EmailField(source="user.email", read_only=True)
+    user_full_name = serializers.CharField(
+        source="user.full_name",
+        read_only=True,
+    )
+    business_public_id = public_id_read_only(source="business")
+    business_name = serializers.CharField(
+        source="business.business_name",
+        read_only=True,
+    )
+    employee_public_id = public_id_read_only(
+        source="employee",
+        allow_null=True,
+    )
+    employee_name = serializers.CharField(
+        source="employee.full_name",
+        read_only=True,
+        allow_null=True,
+    )
+    employee_position = serializers.CharField(
+        source="employee.position",
+        read_only=True,
+        allow_null=True,
+    )
+    employee_status_public_id = serializers.UUIDField(
+        source="employee.status.public_id",
+        read_only=True,
+        allow_null=True,
+    )
+    employee_status_name = serializers.CharField(
+        source="employee.status.name",
+        read_only=True,
+        allow_null=True,
+    )
+    role_display = serializers.CharField(
+        source="get_role_display",
+        read_only=True,
+    )
+
+    class Meta:
+        model = BusinessMembership
+        fields = (
+            "public_id",
+            "user_public_id",
+            "user_email",
+            "user_full_name",
+            "business_public_id",
+            "business_name",
+            "employee_public_id",
+            "employee_name",
+            "employee_position",
+            "employee_status_public_id",
+            "employee_status_name",
+            "role",
+            "role_display",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
 class StrictFieldsSerializerMixin:
     def to_internal_value(self, data):
         if hasattr(data, "keys"):
@@ -267,6 +331,17 @@ class StrictFieldsSerializerMixin:
                     for field in sorted(unknown)
                 })
         return super().to_internal_value(data)
+
+
+class ExistingBusinessMemberCreateSerializer(
+    StrictFieldsSerializerMixin,
+    serializers.Serializer,
+):
+    email = serializers.EmailField(max_length=254)
+    role = serializers.ChoiceField(choices=NON_OWNER_ROLE_CHOICES)
+
+    def validate_email(self, value):
+        return value.strip().lower()
 
 
 class BusinessCreateSerializer(
@@ -535,6 +610,7 @@ class PublicProductCategorySerializer(
             "name",
         )
         read_only_fields = fields
+
 
 class PublicProductSerializer(
     serializers.ModelSerializer,

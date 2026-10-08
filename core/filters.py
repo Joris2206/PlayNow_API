@@ -1,6 +1,7 @@
 # core/filters.py
 from django_filters import rest_framework as filters
 from .models import (
+    BusinessMembership,
     Debt,
     DebtPayment,
     StockMovement,
@@ -9,7 +10,7 @@ from .models import (
 from django_filters.rest_framework import (
     DjangoFilterBackend,
 )
-from rest_framework.filters import SearchFilter
+from rest_framework.filters import OrderingFilter, SearchFilter
 
 
 class ConfiguredSearchFilter(SearchFilter):
@@ -40,6 +41,32 @@ class ConfiguredSearchFilter(SearchFilter):
             return []
 
         return super().get_schema_operation_parameters(view)
+
+
+class BusinessMembershipFilter(filters.FilterSet):
+    business_public_id = filters.UUIDFilter(
+        field_name="business__public_id",
+        required=True,
+    )
+    role = filters.ChoiceFilter(choices=BusinessMembership.ROLES)
+    is_active = filters.BooleanFilter()
+    employee_status_public_id = filters.UUIDFilter(
+        field_name="employee__status__public_id",
+    )
+
+    class Meta:
+        model = BusinessMembership
+        fields = []
+
+
+class StableOrderingFilter(OrderingFilter):
+    """Keep client-selected ordering deterministic without exposing PKs."""
+
+    def get_ordering(self, request, queryset, view):
+        ordering = super().get_ordering(request, queryset, view)
+        if ordering and all(term.lstrip("-") != "pk" for term in ordering):
+            return [*ordering, "pk"]
+        return ordering
 
 
 class TransactionFilter(

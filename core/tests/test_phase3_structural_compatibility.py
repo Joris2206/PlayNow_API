@@ -118,6 +118,12 @@ EXAMPLE_PUBLIC_ID = "00000000-0000-0000-0000-000000000001"
 ROUTER_ROUTE_CASES = (
     ("business-list", None, "/api/businesses/", "BusinessViewSet"),
     (
+        "business-membership-list",
+        None,
+        "/api/business-memberships/",
+        "BusinessMembershipViewSet",
+    ),
+    (
         "business-detail",
         {"public_id": EXAMPLE_PUBLIC_ID},
         f"/api/businesses/{EXAMPLE_PUBLIC_ID}/",
@@ -332,8 +338,8 @@ class PhaseThreeStructuralCompatibilityTests(SimpleTestCase):
         patterns = self._flatten_url_patterns(get_resolver().url_patterns)
         self.assertEqual(
             len(patterns),
-            304,
-            msg="The total URL pattern count changed from the Phase 1 baseline.",
+            306,
+            msg="The total URL pattern count changed from the Phase 3 baseline.",
         )
 
     def _flatten_url_patterns(self, patterns):
