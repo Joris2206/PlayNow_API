@@ -12,7 +12,7 @@ from .views import (
     EmployeeCommissionPlanViewSet, EmployeeCommissionPreviewView, EmployeeSalesReportView,
     CashMovementViewSet, CashRegisterViewSet, MonthlySummaryView, MonthlyClosureViewSet, PaymentSummaryView,
     DashboardOverviewView,
-    PublicProductCategoryViewSet, PublicProductViewSet
+    BusinessUserCreateView, PublicProductCategoryViewSet, PublicProductViewSet
 )
 
 router = DefaultRouter()
@@ -76,6 +76,11 @@ public_router.register(r'categories', PublicProductCategoryViewSet, basename='pu
 public_router.register(r'products', PublicProductViewSet, basename='public-product')
 
 urlpatterns = [
+    path(
+        "businesses/<uuid:public_id>/users/",
+        BusinessUserCreateView.as_view(),
+        name="business-user-create",
+    ),
     path(
         "public/",
         include(public_router.urls),

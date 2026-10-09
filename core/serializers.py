@@ -1,5 +1,6 @@
 from decimal import Decimal
 from typing import Literal, NamedTuple
+from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction as db_tx
 from django.db.models import Sum, Q
@@ -331,6 +332,75 @@ class StrictFieldsSerializerMixin:
                     for field in sorted(unknown)
                 })
         return super().to_internal_value(data)
+
+
+class BusinessUserCreateSerializer(
+    StrictFieldsSerializerMixin,
+    serializers.Serializer,
+):
+    email = serializers.EmailField(max_length=254)
+    full_name = serializers.CharField(max_length=255)
+    password = serializers.CharField(
+        write_only=True,
+        min_length=8,
+        trim_whitespace=False,
+    )
+    password_confirmation = serializers.CharField(
+        write_only=True,
+        min_length=8,
+        trim_whitespace=False,
+    )
+    role = serializers.ChoiceField(choices=NON_OWNER_ROLE_CHOICES)
+
+    def validate_email(self, value):
+        return User.objects.normalize_email(value).strip().lower()
+
+    def validate_full_name(self, value):
+        return value.strip()
+
+    def validate(self, attrs):
+        if attrs["password"] != attrs["password_confirmation"]:
+            raise serializers.ValidationError({
+                "password_confirmation": ["Las contraseñas no coinciden."]
+            })
+        candidate = User(
+            email=attrs["email"],
+            full_name=attrs["full_name"],
+            role=User.Roles.EMPLOYEE,
+        )
+        try:
+            validate_password(attrs["password"], user=candidate)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"password": list(exc.messages)}) from exc
+        return attrs
+
+
+class BusinessUserCreateResponseSerializer(serializers.ModelSerializer):
+    user_public_id = public_id_read_only(source="user")
+    email = serializers.EmailField(source="user.email", read_only=True)
+    full_name = serializers.CharField(source="user.full_name", read_only=True)
+    membership_public_id = serializers.UUIDField(source="public_id", read_only=True)
+    business_public_id = public_id_read_only(source="business")
+    employee_public_id = public_id_read_only(
+        source="employee",
+        allow_null=True,
+    )
+
+    class Meta:
+        model = BusinessMembership
+        fields = (
+            "user_public_id",
+            "email",
+            "full_name",
+            "membership_public_id",
+            "business_public_id",
+            "role",
+            "is_active",
+            "employee_public_id",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
 
 
 class ExistingBusinessMemberCreateSerializer(

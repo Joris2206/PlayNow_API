@@ -55,6 +55,10 @@ from core.services.business_provisioning import (
     BusinessProvisioningError,
     provision_business,
 )
+from core.services.business_users import (
+    BusinessUserProvisioningError,
+    provision_business_user,
+)
 from .filters import (
     BusinessMembershipFilter,
     ConfiguredSearchFilter,
@@ -89,6 +93,8 @@ from .serializers import (
     BusinessMembershipListSerializer,
     BusinessMembershipSerializer,
     BusinessMembershipUpdateSerializer,
+    BusinessUserCreateResponseSerializer,
+    BusinessUserCreateSerializer,
     CashMovementSerializer,
     CashRegisterSummaryResponseSerializer,
     CashRegisterCloseSerializer,
@@ -234,6 +240,65 @@ def _raise_business_provisioning_error(exc):
     if exc.kind == "conflict":
         raise MembershipConflict(exc.detail)
     raise ValidationError(exc.detail)
+
+
+def _raise_business_user_provisioning_error(exc):
+    if exc.kind == "forbidden":
+        raise PermissionDenied(exc.detail)
+    if exc.kind == "not_found":
+        raise NotFound(exc.detail)
+    if exc.kind == "conflict":
+        raise MembershipConflict(exc.detail)
+    raise ValidationError(exc.detail)
+
+
+@extend_schema(
+    tags=["Business Access"],
+    summary="Crear una cuenta vinculada a un negocio",
+    description=(
+        "Crea un User global nuevo y una BusinessMembership activa sin "
+        "Employee. Solo un Platform Admin activo o un owner activo del "
+        "negocio puede ejecutar esta operación. Para correos existentes "
+        "debe utilizarse el flujo de agregar usuario existente."
+    ),
+    request=BusinessUserCreateSerializer,
+    responses={
+        201: BusinessUserCreateResponseSerializer,
+        400: OpenApiResponse(description="Payload o contraseña inválidos."),
+        401: OpenApiResponse(description="Autenticación requerida."),
+        403: OpenApiResponse(description="Rol no autorizado."),
+        404: OpenApiResponse(description="Negocio no visible."),
+        409: OpenApiResponse(description="El correo ya pertenece a una cuenta."),
+    },
+)
+class BusinessUserCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "admin_write"
+
+    def post(self, request, public_id):
+        serializer = BusinessUserCreateSerializer(data=request.data)
+
+        def validate_payload():
+            serializer.is_valid(raise_exception=True)
+            return serializer.validated_data
+
+        try:
+            membership = provision_business_user(
+                actor=request.user,
+                business_public_id=public_id,
+                validate_payload=validate_payload,
+            )
+        except BusinessUserProvisioningError as exc:
+            _raise_business_user_provisioning_error(exc)
+
+        return Response(
+            BusinessUserCreateResponseSerializer(
+                membership,
+                context={"request": request},
+            ).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 def _update_membership_response(*, request, membership_public_id):
