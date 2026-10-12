@@ -12,7 +12,7 @@ from django.utils import timezone
 from drf_spectacular.generators import SchemaGenerator
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
-from rest_framework_simplejwt.tokens import RefreshToken
+from core.tokens import VersionedRefreshToken
 
 from core.models import BusinessMembership, Employee, User
 from core.services.business_memberships import (
@@ -1170,7 +1170,7 @@ class BusinessMembershipAccessConcurrencyTests(TransactionTestCase):
             role=BusinessMembership.ROLE_SELLER,
             is_active=False,
         )
-        token = RefreshToken.for_user(self.outsider).access_token
+        token = VersionedRefreshToken.for_user(self.outsider).access_token
 
         def persisted_snapshot(instance):
             field_names = [
@@ -1270,7 +1270,7 @@ class BusinessMembershipAccessConcurrencyTests(TransactionTestCase):
         self.assertTrue(self.target.is_active)
 
     def test_list_uses_current_platform_privilege_not_authenticated_snapshot(self):
-        token = RefreshToken.for_user(
+        token = VersionedRefreshToken.for_user(
             create_user(
                 email="phase3-stale-platform@playnow.test",
                 is_superuser=True,

@@ -2,18 +2,11 @@
 from decimal import Decimal
 
 from django.db.models.aggregates import Sum
-from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.decorators import api_view, throttle_classes, permission_classes
-from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework.permissions import AllowAny
 import logging
 
 from core.models import CashMovement
-
-class LoginView(TokenObtainPairView):
-    throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'login'
-    permission_classes = [AllowAny]
+from core.api.views.auth import LoginView
 
 
 audit_logger = logging.getLogger("audit")

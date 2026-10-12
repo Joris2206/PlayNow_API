@@ -11,6 +11,7 @@ class FinancialHardeningMigrationTests(TransactionTestCase):
     reset_sequences = True
     migrate_from = [("core", "0002_remove_productvariant_status_and_more")]
     migrate_to = [("core", "0003_harden_debt_audit_constraints")]
+    restore_to = [("core", "0005_add_user_auth_version")]
 
     def _migrate(self, targets):
         executor = MigrationExecutor(connection)
@@ -190,7 +191,7 @@ class FinancialHardeningMigrationTests(TransactionTestCase):
             self.assertIn("created_by_id", columns)
             self.assertIn("debt_total_amount_gt_0", constraints)
         finally:
-            self._migrate(self.migrate_to)
+            self._migrate(self.restore_to)
 
     def test_invalid_historical_data_blocks_without_partial_schema(self):
         HistoricalDebt = None
@@ -249,4 +250,4 @@ class FinancialHardeningMigrationTests(TransactionTestCase):
         finally:
             if HistoricalDebt is not None and invalid_debt_pk is not None:
                 HistoricalDebt.objects.filter(pk=invalid_debt_pk).delete()
-            self._migrate(self.migrate_to)
+            self._migrate(self.restore_to)

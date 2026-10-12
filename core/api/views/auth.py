@@ -11,17 +11,64 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
+from rest_framework_simplejwt.views import (
+    TokenObtainPairView,
+    TokenRefreshView,
+    TokenViewBase,
+)
 
 from core.api.serializers.auth import (
     ChangePasswordSerializer,
+    LoginSerializer,
+    LogoutSerializer,
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
+    RefreshSerializer,
     RegisterSerializer,
+    _raise_auth_session_error,
 )
 from core.models import User
+from core.services.auth_sessions import AuthSessionError, change_user_password
+from core.tokens import AUTH_VERSION_CLAIM
 
 
 FRONTEND_RESET_URL = settings.FRONTEND_RESET_URL
+
+
+class LoginView(TokenObtainPairView):
+    serializer_class = LoginSerializer
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
+
+
+class RefreshView(TokenRefreshView):
+    serializer_class = RefreshSerializer
+
+
+@extend_schema(
+    tags=["Auth"],
+    request=LogoutSerializer,
+    responses={
+        204: OpenApiResponse(description="Sesiones revocadas."),
+        401: OpenApiResponse(description="Refresh token no válido."),
+    },
+    summary="Cerrar todas las sesiones del usuario",
+    description=(
+        "Logout global: invalida access y refresh de todas las pestañas y "
+        "dispositivos del usuario. No requiere un access token vigente."
+    ),
+    auth=[{}],
+)
+class LogoutView(TokenViewBase):
+    serializer_class = LogoutSerializer
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 REGISTER_EXAMPLE = OpenApiExample(
@@ -71,9 +118,20 @@ class UserViewSet(viewsets.GenericViewSet):
     def change_password(self, request):
         ser = ChangePasswordSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
-        user = request.user
-        user.set_password(ser.validated_data["new_password"])
-        user.save(update_fields=["password"])
+        expected_auth_version = (
+            request.auth.get(AUTH_VERSION_CLAIM)
+            if request.auth is not None
+            else request.user.auth_version
+        )
+        try:
+            change_user_password(
+                user_id=request.user.pk,
+                expected_auth_version=expected_auth_version,
+                current_password=ser.validated_data["current_password"],
+                new_password=ser.validated_data["new_password"],
+            )
+        except AuthSessionError as exc:
+            _raise_auth_session_error(exc)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

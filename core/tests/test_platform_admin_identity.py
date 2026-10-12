@@ -1,6 +1,6 @@
 from rest_framework import status
 from rest_framework.test import APITestCase
-from rest_framework_simplejwt.tokens import RefreshToken
+from core.tokens import VersionedRefreshToken
 
 from core.api.serializers.auth import (
     ChangePasswordSerializer,
@@ -265,7 +265,7 @@ class PlatformAdminBusinessIsolationTests(APITestCase):
         )
 
     def test_revoking_superuser_removes_bypass_with_existing_jwt(self):
-        access_token = RefreshToken.for_user(self.superuser).access_token
+        access_token = VersionedRefreshToken.for_user(self.superuser).access_token
         self.client.credentials(
             HTTP_AUTHORIZATION=f"Bearer {access_token}"
         )

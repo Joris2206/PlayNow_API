@@ -8,7 +8,7 @@ from django.test import TransactionTestCase
 from django.urls import resolve, reverse
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
-from rest_framework_simplejwt.tokens import RefreshToken
+from core.tokens import VersionedRefreshToken
 
 from core.models import BusinessMembership, Employee, User
 from core.services.business_memberships import (
@@ -505,7 +505,7 @@ class BusinessMembershipAPITests(APITestCase):
         )
 
     def test_membership_changes_apply_with_same_jwt(self):
-        token = RefreshToken.for_user(self.admin).access_token
+        token = VersionedRefreshToken.for_user(self.admin).access_token
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
         business_url = reverse("business-detail", kwargs={"public_id": self.business.public_id})
@@ -666,7 +666,7 @@ class BusinessMembershipConcurrencyTests(TransactionTestCase):
             is_superuser=True,
         )
         self.platform.refresh_from_db()
-        token = RefreshToken.for_user(self.platform).access_token
+        token = VersionedRefreshToken.for_user(self.platform).access_token
 
         def request_operation():
             client = APIClient()

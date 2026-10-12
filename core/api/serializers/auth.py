@@ -1,18 +1,38 @@
+import binascii
+
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
-from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_serializer
+from rest_framework import exceptions, serializers
+from rest_framework_simplejwt.exceptions import TokenError
 
 from core.models import User
+from core.services.auth_sessions import (
+    AuthSessionError,
+    login_and_issue_tokens,
+    logout_user_sessions,
+    reset_user_password,
+    rotate_refresh_token,
+)
 
 try:
-    from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+    from rest_framework_simplejwt.token_blacklist.models import (
+        BlacklistedToken,
+        OutstandingToken,
+    )
     BLACKLIST_ENABLED = True
 except ImportError:
     BLACKLIST_ENABLED = False
 
 
 token_generator = PasswordResetTokenGenerator()
+
+
+def _raise_auth_session_error(exc):
+    if exc.code == "invalid_password":
+        raise serializers.ValidationError(exc.detail)
+    raise exceptions.AuthenticationFailed(exc.detail, code=exc.code)
 
 
 class HealthSerializer(serializers.Serializer):
@@ -37,15 +57,54 @@ class RegisterSerializer(serializers.ModelSerializer):
         )
 
 
+@extend_schema_serializer(component_name="TokenObtainPair")
+class LoginSerializer(serializers.Serializer):
+    email = serializers.CharField(write_only=True)
+    password = serializers.CharField(write_only=True, trim_whitespace=False)
+    access = serializers.CharField(read_only=True)
+    refresh = serializers.CharField(read_only=True)
+
+    def validate(self, attrs):
+        try:
+            return login_and_issue_tokens(
+                email=attrs["email"].strip().lower(),
+                password=attrs["password"],
+            )
+        except AuthSessionError as exc:
+            _raise_auth_session_error(exc)
+
+
+@extend_schema_serializer(component_name="TokenRefresh")
+class RefreshSerializer(serializers.Serializer):
+    refresh = serializers.CharField()
+    access = serializers.CharField(read_only=True)
+
+    def validate(self, attrs):
+        try:
+            return rotate_refresh_token(raw_token=attrs["refresh"])
+        except AuthSessionError as exc:
+            _raise_auth_session_error(exc)
+
+
+class LogoutSerializer(serializers.Serializer):
+    refresh = serializers.CharField(write_only=True)
+
+    def validate(self, attrs):
+        try:
+            logout_user_sessions(raw_token=attrs["refresh"])
+        except AuthSessionError as exc:
+            _raise_auth_session_error(exc)
+        except TokenError as exc:
+            raise exceptions.AuthenticationFailed(
+                "El token no es válido.",
+                code="authentication_failed",
+            ) from exc
+        return {}
+
+
 class ChangePasswordSerializer(serializers.Serializer):
     current_password = serializers.CharField(write_only=True, trim_whitespace=False)
     new_password = serializers.CharField(write_only=True, trim_whitespace=False)
-
-    def validate(self, attrs):
-        user = self.context["request"].user
-        if not user.check_password(attrs["current_password"]):
-            raise serializers.ValidationError({"current_password": "Contraseña actual incorrecta."})
-        return attrs
 
 
 class PasswordResetRequestSerializer(serializers.Serializer):
@@ -89,24 +148,31 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
     def validate(self, attrs):
         try:
             uid = force_str(urlsafe_base64_decode(attrs["uid"]))
-            user = User.objects.get(pk=uid)
-        except Exception:
+            user_id = int(uid)
+            user = User.objects.get(pk=user_id)
+        except (
+            binascii.Error,
+            TypeError,
+            ValueError,
+            OverflowError,
+            UnicodeDecodeError,
+            User.DoesNotExist,
+        ):
             raise serializers.ValidationError({"uid": "UID inválido."})
 
         if not token_generator.check_token(user, attrs["token"]):
             raise serializers.ValidationError({"token": "Token inválido o expirado."})
 
-        self.user = user
+        self.user_id = user.pk
         return attrs
 
     def save(self):
-        user = self.user
-        user.set_password(self.validated_data["new_password"])
-        user.save(update_fields=["password"])
-
-        if BLACKLIST_ENABLED:
-            try:
-                for token in OutstandingToken.objects.filter(user=user):
-                    BlacklistedToken.objects.get_or_create(token=token)
-            except Exception:
-                pass
+        try:
+            return reset_user_password(
+                user_id=self.user_id,
+                reset_token=self.validated_data["token"],
+                new_password=self.validated_data["new_password"],
+                token_generator=token_generator,
+            )
+        except AuthSessionError as exc:
+            _raise_auth_session_error(exc)

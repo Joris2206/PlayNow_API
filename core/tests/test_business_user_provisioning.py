@@ -10,7 +10,7 @@ from django.urls import resolve, reverse
 from drf_spectacular.generators import SchemaGenerator
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
-from rest_framework_simplejwt.tokens import RefreshToken
+from core.tokens import VersionedRefreshToken
 
 from core.models import BusinessMembership, Employee, EntityStatus, User
 from core.services.business_users import (
@@ -518,7 +518,7 @@ class BusinessUserProvisioningConcurrencyTests(TransactionTestCase):
 
     def jwt_client(self, actor):
         client = APIClient()
-        token = RefreshToken.for_user(actor).access_token
+        token = VersionedRefreshToken.for_user(actor).access_token
         client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
         return client
 

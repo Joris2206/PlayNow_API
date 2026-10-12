@@ -16,8 +16,7 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from rest_framework_simplejwt.views import TokenRefreshView
-from core.utils import LoginView
+from core.api.views.auth import LoginView, LogoutView, RefreshView
 from django.views.generic import RedirectView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 
@@ -27,7 +26,8 @@ urlpatterns = [
 
     # JWT endpoints
     path('api/login/', LoginView.as_view(), name='token_obtain_pair'),
-    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('api/token/refresh/', RefreshView.as_view(), name='token_refresh'),
+    path('api/logout/', LogoutView.as_view(), name='token_logout'),
     
     path('api-auth/', include('rest_framework.urls')),
 
