@@ -1,5 +1,9 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from core.api.views.platform_users import (
+    PlatformUserDetailView,
+    PlatformUserListView,
+)
 from .views import (
     CommissionSettlementViewSet, CurrentUserView, CustomerSummaryView, DebtSummaryView, InventorySummaryView, SupplierSummaryView, healthcheck, RegisterViewSet,
     BusinessMembershipViewSet, BusinessViewSet, EntityStatusViewSet,
@@ -76,6 +80,16 @@ public_router.register(r'categories', PublicProductCategoryViewSet, basename='pu
 public_router.register(r'products', PublicProductViewSet, basename='public-product')
 
 urlpatterns = [
+    path(
+        "platform/users/",
+        PlatformUserListView.as_view(),
+        name="platform-user-list",
+    ),
+    path(
+        "platform/users/<uuid:public_id>/",
+        PlatformUserDetailView.as_view(),
+        name="platform-user-detail",
+    ),
     path(
         "businesses/<uuid:public_id>/users/",
         BusinessUserCreateView.as_view(),

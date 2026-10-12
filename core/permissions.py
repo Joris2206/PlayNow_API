@@ -3,6 +3,7 @@ from rest_framework.permissions import BasePermission
 from core.models import (
     Business,
     BusinessMembership,
+    User,
 )
 
 
@@ -102,6 +103,22 @@ class IsAuthenticatedUser(BasePermission):
             request.user
             and request.user.is_authenticated
         )
+
+
+class IsActivePlatformAdmin(BasePermission):
+    """Authorize exclusively from the actor's current database state."""
+
+    message = "Esta operación requiere acceso de Platform Admin."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        return User.objects.filter(
+            pk=user.pk,
+            is_active=True,
+            is_superuser=True,
+        ).exists()
 
 
 class HasBusinessMembership(BasePermission):

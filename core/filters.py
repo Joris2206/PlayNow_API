@@ -6,6 +6,7 @@ from .models import (
     DebtPayment,
     StockMovement,
     Transaction,
+    User,
 )
 from django_filters.rest_framework import (
     DjangoFilterBackend,
@@ -67,6 +68,25 @@ class StableOrderingFilter(OrderingFilter):
         if ordering and all(term.lstrip("-") != "pk" for term in ordering):
             return [*ordering, "pk"]
         return ordering
+
+
+class PlatformUserFilter(filters.FilterSet):
+    is_active = filters.ChoiceFilter(
+        choices=(("true", "true"), ("false", "false")),
+        method="filter_boolean",
+    )
+    is_superuser = filters.ChoiceFilter(
+        choices=(("true", "true"), ("false", "false")),
+        method="filter_boolean",
+    )
+
+    @staticmethod
+    def filter_boolean(queryset, name, value):
+        return queryset.filter(**{name: value == "true"})
+
+    class Meta:
+        model = User
+        fields = []
 
 
 class TransactionFilter(
