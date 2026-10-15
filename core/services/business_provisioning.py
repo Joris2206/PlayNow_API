@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from django.db import transaction
 
 from core.models import Business, BusinessMembership, User
+from core.services import multi_user_write_lock
 
 
 INITIAL_OWNER_ERROR = "No fue posible asignar el propietario inicial."
@@ -59,6 +60,19 @@ def _has_effective_owner(business):
     ).exists()
 
 
+def _preauthorize_administrative_provisioning(actor_id):
+    if not User.objects.filter(
+        pk=actor_id,
+        is_active=True,
+        is_superuser=True,
+    ).exists():
+        raise BusinessProvisioningError(
+            "La operación administrativa ya no está autorizada.",
+            "forbidden",
+        )
+
+
+@multi_user_write_lock.translate_multi_user_write_contention
 @transaction.atomic
 def provision_business(
     *,
@@ -67,6 +81,9 @@ def provision_business(
     initial_owner_email=None,
 ):
     requested_admin_mode = initial_owner_email is not None
+    if requested_admin_mode:
+        _preauthorize_administrative_provisioning(actor.pk)
+        multi_user_write_lock.acquire_multi_user_write_lock()
     candidate_ids = _candidate_owner_ids(initial_owner_email)
     locked_users = _lock_users([actor.pk, *candidate_ids])
     locked_actor = locked_users[actor.pk]

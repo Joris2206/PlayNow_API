@@ -9,6 +9,7 @@ from datetime import timedelta
 import os
 
 from dotenv import load_dotenv, find_dotenv
+from django.core.exceptions import ImproperlyConfigured
 
 # -------------------------
 # Helpers
@@ -16,6 +17,21 @@ from dotenv import load_dotenv, find_dotenv
 def list_from_env(key: str, default: str = "") -> list[str]:
     raw = os.getenv(key, default)
     return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def positive_milliseconds_from_env(key: str, default: int) -> int:
+    """Read a PostgreSQL-compatible positive millisecond timeout."""
+
+    raw_value = os.getenv(key, str(default))
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ImproperlyConfigured(f"{key} must be a positive integer.") from exc
+    if value <= 0 or value > 2_147_483_647:
+        raise ImproperlyConfigured(
+            f"{key} must be between 1 and 2147483647 milliseconds."
+        )
+    return value
 
 # -------------------------
 # Paths
@@ -112,6 +128,14 @@ DATABASES = {
     }
 }
 
+# Bounds every PostgreSQL lock wait while a transaction participates in the
+# global multi-User writer protocol. It is applied with SET LOCAL, never as a
+# persistent connection or database-wide setting.
+MULTI_USER_WRITE_LOCK_TIMEOUT_MS = positive_milliseconds_from_env(
+    "MULTI_USER_WRITE_LOCK_TIMEOUT_MS",
+    5_000,
+)
+
 # -------------------------
 # Password validators
 # -------------------------
@@ -184,7 +208,7 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "core.pagination.StandardResultsSetPagination",
 
     # Usa la default de DRF o cambia por custom si lo necesitas
-    "EXCEPTION_HANDLER": "rest_framework.views.exception_handler",
+    "EXCEPTION_HANDLER": "core.api.exception_handlers.playnow_exception_handler",
 }
 
 # -------------------------

@@ -20,6 +20,7 @@ from core.services.business_memberships import (
     add_existing_member,
 )
 from core.services import business_memberships as membership_service
+from core.services import multi_user_write_lock
 from core.tests.factories import (
     create_business,
     create_employee,
@@ -871,7 +872,7 @@ class BusinessMembershipAccessAPITests(APITestCase):
         create_operation = members_path["post"]
         self.assertEqual(
             set(create_operation["responses"]),
-            {"200", "201", "400", "401", "403", "404", "409"},
+            {"200", "201", "400", "401", "403", "404", "409", "503"},
         )
         self.assertEqual(
             create_operation["requestBody"]["content"]["application/json"][
@@ -898,6 +899,71 @@ class BusinessMembershipAccessConcurrencyTests(TransactionTestCase):
         self.business = create_business(user=self.owner, status=active)
         self.target = create_user(email="phase3-race-target@playnow.test")
         self.outsider = create_user(email="phase3-race-outsider@playnow.test")
+
+    def test_canonical_unauthorized_existing_and_missing_skip_advisory(self):
+        membership = create_membership(
+            user=self.target,
+            business=self.business,
+            role=BusinessMembership.ROLE_SELLER,
+        )
+        before = tuple(
+            BusinessMembership.objects.order_by("pk").values()
+        )
+        acquired = Event()
+        release = Event()
+
+        def hold_advisory():
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    multi_user_write_lock.acquire_multi_user_write_lock()
+                    acquired.set()
+                    if not release.wait(timeout=20):
+                        raise TimeoutError("advisory holder was not released")
+            finally:
+                close_old_connections()
+                connections.close_all()
+
+        def request(method, public_id):
+            close_old_connections()
+            try:
+                client = APIClient()
+                client.force_authenticate(user=User.objects.get(pk=self.outsider.pk))
+                url = reverse(
+                    "business-membership-detail",
+                    kwargs={"membership_public_id": public_id},
+                )
+                if method == "patch":
+                    return client.patch(url, {"role": "viewer"}, format="json")
+                return client.delete(url)
+            finally:
+                close_old_connections()
+                connections.close_all()
+
+        responses = []
+        try:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                holder = executor.submit(hold_advisory)
+                self.assertTrue(acquired.wait(timeout=10))
+                for method in ("patch", "delete"):
+                    existing = executor.submit(request, method, membership.public_id)
+                    existing_response = existing.result(timeout=2)
+                    missing = executor.submit(request, method, uuid4())
+                    missing_response = missing.result(timeout=2)
+                    responses.extend([existing_response, missing_response])
+                    self.assertEqual(existing_response.status_code, 404)
+                    self.assertEqual(existing_response.data, missing_response.data)
+                    self.assertFalse(holder.done())
+                release.set()
+                holder.result(timeout=20)
+        finally:
+            release.set()
+
+        self.assertEqual(
+            tuple(BusinessMembership.objects.order_by("pk").values()),
+            before,
+        )
+        self.assertEqual({response.status_code for response in responses}, {404})
 
     def concurrent_adds(self, roles):
         barrier = Barrier(len(roles))

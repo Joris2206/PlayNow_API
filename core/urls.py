@@ -1,8 +1,12 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from core.api.views.platform_users import (
+    PlatformUserActivateView,
+    PlatformUserDeactivateView,
     PlatformUserDetailView,
     PlatformUserListView,
+    PlatformUserResetPasswordView,
+    PlatformUserRevokeSessionsView,
 )
 from .views import (
     CommissionSettlementViewSet, CurrentUserView, CustomerSummaryView, DebtSummaryView, InventorySummaryView, SupplierSummaryView, healthcheck, RegisterViewSet,
@@ -89,6 +93,26 @@ urlpatterns = [
         "platform/users/<uuid:public_id>/",
         PlatformUserDetailView.as_view(),
         name="platform-user-detail",
+    ),
+    path(
+        "platform/users/<uuid:public_id>/activate/",
+        PlatformUserActivateView.as_view(),
+        name="platform-user-activate",
+    ),
+    path(
+        "platform/users/<uuid:public_id>/deactivate/",
+        PlatformUserDeactivateView.as_view(),
+        name="platform-user-deactivate",
+    ),
+    path(
+        "platform/users/<uuid:public_id>/reset-password/",
+        PlatformUserResetPasswordView.as_view(),
+        name="platform-user-reset-password",
+    ),
+    path(
+        "platform/users/<uuid:public_id>/revoke-sessions/",
+        PlatformUserRevokeSessionsView.as_view(),
+        name="platform-user-revoke-sessions",
     ),
     path(
         "businesses/<uuid:public_id>/users/",

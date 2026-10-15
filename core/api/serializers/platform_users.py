@@ -43,3 +43,37 @@ class PlatformUserIdentityUpdateSerializer(
                 "Debe proporcionar email o full_name."
             )
         return attrs
+
+
+class EmptyPlatformUserActionSerializer(
+    StrictFieldsSerializerMixin,
+    serializers.Serializer,
+):
+    pass
+
+
+class PlatformUserPasswordResetSerializer(
+    StrictFieldsSerializerMixin,
+    serializers.Serializer,
+):
+    password = serializers.CharField(
+        write_only=True,
+        allow_blank=False,
+        allow_null=False,
+        trim_whitespace=False,
+    )
+    password_confirmation = serializers.CharField(
+        write_only=True,
+        allow_blank=False,
+        allow_null=False,
+        trim_whitespace=False,
+    )
+
+    def validate(self, attrs):
+        if attrs["password"] != attrs["password_confirmation"]:
+            raise serializers.ValidationError({
+                "password_confirmation": [
+                    "Las contraseñas no coinciden."
+                ]
+            })
+        return attrs

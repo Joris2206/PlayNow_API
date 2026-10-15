@@ -338,8 +338,8 @@ class PhaseThreeStructuralCompatibilityTests(SimpleTestCase):
         patterns = self._flatten_url_patterns(get_resolver().url_patterns)
         self.assertEqual(
             len(patterns),
-            310,
-            msg="The total URL pattern count changed from the Phase 4B1 baseline.",
+            314,
+            msg="The total URL pattern count changed from the Phase 4B3 baseline.",
         )
 
     def _flatten_url_patterns(self, patterns):

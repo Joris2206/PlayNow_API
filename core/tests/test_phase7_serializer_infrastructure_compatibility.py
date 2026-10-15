@@ -1,4 +1,5 @@
 import ast
+import copy
 import hashlib
 import inspect
 import os
@@ -17,6 +18,7 @@ from rest_framework.exceptions import ValidationError
 
 from core import serializers as legacy_serializers
 from core.api.serializers.access import active_membership_business_ids
+from core.api.exception_handlers import MULTI_USER_WRITE_CONTENTION_OPENAPI_SCHEMA
 from core.api.serializers.fields import (
     SecurePublicIdRelatedField,
     public_id_read_only,
@@ -33,8 +35,31 @@ from core.tests.factories import (
 
 
 EXPECTED_OPENAPI_SHA256 = (
-    "3e75c2255bed2e84096fc501ca1ae644c6f184d624e2bb996a2a25f4794aaf26"
+    "9b895eb56166c091043f348d294196c7b4392656910df8200b0cde6ac7399a1b"
 )
+PRE_TIMEOUT_OPENAPI_SHA256 = (
+    "ae6fb8ad932a7ae1dc2a999cc06d24229ce78ebaa36086f3f758c0793ef53537"
+)
+
+MULTI_USER_WRITE_503_OPERATIONS = {
+    ("/api/business-memberships/{membership_public_id}/", "patch"),
+    ("/api/business-memberships/{membership_public_id}/", "delete"),
+    ("/api/businesses/", "post"),
+    ("/api/businesses/{public_id}/members/", "post"),
+    ("/api/businesses/{public_id}/members/{membership_public_id}/", "delete"),
+    ("/api/businesses/{public_id}/owners/", "post"),
+    (
+        "/api/businesses/{public_id}/owners/"
+        "{membership_public_id}/remove/",
+        "post",
+    ),
+    ("/api/businesses/{public_id}/ownership-transfer/", "post"),
+    ("/api/platform/users/{public_id}/", "patch"),
+    ("/api/platform/users/{public_id}/activate/", "post"),
+    ("/api/platform/users/{public_id}/deactivate/", "post"),
+    ("/api/platform/users/{public_id}/reset-password/", "post"),
+    ("/api/platform/users/{public_id}/revoke-sessions/", "post"),
+}
 
 CANONICAL_LOCATIONS = {
     "public_id_read_only": "core/api/serializers/fields.py",
@@ -489,6 +514,39 @@ class PhaseSevenSerializerInfrastructureStructuralTests(SimpleTestCase):
         self.assertEqual(
             hashlib.sha256(rendered).hexdigest(),
             EXPECTED_OPENAPI_SHA256,
+        )
+
+    def test_only_multi_user_writers_add_the_transient_503_response(self):
+        schema = SchemaGenerator().get_schema(request=None, public=True)
+        documented = {
+            (path, method)
+            for path, path_item in schema["paths"].items()
+            for method, operation in path_item.items()
+            if isinstance(operation, dict)
+            and "503" in operation.get("responses", {})
+        }
+        self.assertEqual(documented, MULTI_USER_WRITE_503_OPERATIONS)
+
+        stripped = copy.deepcopy(schema)
+        for path, method in documented:
+            response = stripped["paths"][path][method]["responses"].pop("503")
+            self.assertEqual(
+                response,
+                {
+                    "content": {
+                        "application/json": {
+                            "schema": MULTI_USER_WRITE_CONTENTION_OPENAPI_SCHEMA,
+                        }
+                    },
+                    "description": (
+                        "El protocolo de escritura está temporalmente ocupado."
+                    )
+                },
+            )
+        rendered = OpenApiYamlRenderer().render(stripped)
+        self.assertEqual(
+            hashlib.sha256(rendered).hexdigest(),
+            PRE_TIMEOUT_OPENAPI_SHA256,
         )
 
     def test_import_orders_in_isolated_processes(self):

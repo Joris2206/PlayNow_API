@@ -5,6 +5,7 @@ from django.db import transaction
 from django.db.models import Exists, OuterRef, Q
 
 from core.models import Business, BusinessMembership, User
+from core.services import multi_user_write_lock
 
 
 NON_OWNER_ROLES = frozenset({
@@ -285,6 +286,123 @@ def _preauthorize_add_existing_member(*, actor_id, business_public_id):
         )
 
 
+def _preauthorize_membership_mutation(*, actor_id, membership_public_id):
+    """Resolve only targets visible to the actor before global contention."""
+
+    visible_memberships = (
+        BusinessMembership.objects.filter(public_id=membership_public_id)
+        .annotate(
+            actor_is_platform_admin=Exists(
+                User.objects.filter(
+                    pk=actor_id,
+                    is_active=True,
+                    is_superuser=True,
+                )
+            ),
+            actor_can_manage=Exists(
+                BusinessMembership.objects.filter(
+                    business_id=OuterRef("business_id"),
+                    user_id=actor_id,
+                    user__is_active=True,
+                    is_active=True,
+                    role__in=[
+                        BusinessMembership.ROLE_OWNER,
+                        BusinessMembership.ROLE_ADMIN,
+                    ],
+                )
+            ),
+            actor_has_active_membership=Exists(
+                BusinessMembership.objects.filter(
+                    business_id=OuterRef("business_id"),
+                    user_id=actor_id,
+                    user__is_active=True,
+                    is_active=True,
+                )
+            ),
+        )
+        .filter(
+            Q(actor_is_platform_admin=True)
+            | Q(actor_has_active_membership=True)
+        )
+        .only("pk", "business_id")
+    )
+    try:
+        identity = visible_memberships.get()
+    except (BusinessMembership.DoesNotExist, ValueError) as exc:
+        raise MembershipDomainError(
+            "El recurso solicitado no se encuentra disponible.",
+            "not_found",
+        ) from exc
+    if not (identity.actor_is_platform_admin or identity.actor_can_manage):
+        raise MembershipDomainError(
+            "No tienes permiso para administrar membresías.",
+            "forbidden",
+        )
+    return identity
+
+
+def _preauthorize_ownership_actor(
+    *,
+    actor_id,
+    business_id=None,
+    business_public_id=None,
+):
+    """Reject unauthorized ownership writers before the global advisory."""
+
+    businesses = Business.objects.all()
+    if business_id is not None:
+        businesses = businesses.filter(pk=business_id)
+    else:
+        businesses = businesses.filter(public_id=business_public_id)
+    visible_businesses = (
+        businesses.annotate(
+            actor_is_platform_admin=Exists(
+                User.objects.filter(
+                    pk=actor_id,
+                    is_active=True,
+                    is_superuser=True,
+                )
+            ),
+            actor_is_owner=Exists(
+                BusinessMembership.objects.filter(
+                    business_id=OuterRef("pk"),
+                    user_id=actor_id,
+                    user__is_active=True,
+                    is_active=True,
+                    role=BusinessMembership.ROLE_OWNER,
+                )
+            ),
+            actor_has_membership=Exists(
+                BusinessMembership.objects.filter(
+                    business_id=OuterRef("pk"),
+                    user_id=actor_id,
+                )
+            ),
+        )
+        .filter(
+            Q(actor_is_platform_admin=True)
+            | Q(actor_has_membership=True)
+        )
+        .only("pk")
+    )
+    try:
+        visible_business = visible_businesses.get()
+    except (Business.DoesNotExist, ValueError) as exc:
+        raise MembershipDomainError(
+            "El recurso solicitado no se encuentra disponible.",
+            "not_found",
+        ) from exc
+    if not (
+        visible_business.actor_is_platform_admin
+        or visible_business.actor_is_owner
+    ):
+        raise MembershipDomainError(
+            "Solo un owner efectivo puede administrar ownership.",
+            "forbidden",
+        )
+
+
+@multi_user_write_lock.translate_multi_user_write_contention
 @transaction.atomic
 def add_existing_member(*, actor, business_public_id, email, role):
     """Create or reactivate a non-owner membership for an existing User."""
@@ -293,6 +411,7 @@ def add_existing_member(*, actor, business_public_id, email, role):
         actor_id=actor.pk,
         business_public_id=business_public_id,
     )
+    multi_user_write_lock.acquire_multi_user_write_lock()
 
     # The target is resolved only after the actor passes the DB-backed
     # preflight. Eligibility is still authoritative only after row locks.
@@ -416,6 +535,7 @@ def _assert_effective_owner(*, business):
 
 
 def _locked_context(*, actor, business_id, target_ids):
+    multi_user_write_lock.acquire_multi_user_write_lock()
     business = _lock_business(business_id)
     actor_membership_id = _actor_membership_id(
         actor_id=actor.pk,
@@ -437,6 +557,7 @@ def _locked_context(*, actor, business_id, target_ids):
     return business, memberships, users, locked_actor, actor_membership
 
 
+@multi_user_write_lock.translate_multi_user_write_contention
 @transaction.atomic
 def update_membership(*, actor, membership, changes):
     business, memberships, _, locked_actor, actor_membership = _locked_context(
@@ -463,6 +584,7 @@ def update_membership(*, actor, membership, changes):
     return target
 
 
+@multi_user_write_lock.translate_multi_user_write_contention
 @transaction.atomic
 def deactivate_membership(*, actor, membership):
     business, memberships, _, locked_actor, actor_membership = _locked_context(
@@ -483,8 +605,10 @@ def deactivate_membership(*, actor, membership):
     return target
 
 
+@multi_user_write_lock.translate_multi_user_write_contention
 @transaction.atomic
 def promote_to_owner(*, actor, business, membership):
+    _preauthorize_ownership_actor(actor_id=actor.pk, business_id=business.pk)
     (
         locked_business,
         memberships,
@@ -522,8 +646,10 @@ def promote_to_owner(*, actor, business, membership):
     return target
 
 
+@multi_user_write_lock.translate_multi_user_write_contention
 @transaction.atomic
 def transfer_ownership(*, actor, business, from_membership, to_membership, from_role):
+    _preauthorize_ownership_actor(actor_id=actor.pk, business_id=business.pk)
     if from_membership.pk == to_membership.pk:
         raise MembershipDomainError(
             "Las memberships de origen y destino deben ser diferentes.",
@@ -569,8 +695,10 @@ def transfer_ownership(*, actor, business, from_membership, to_membership, from_
     return source, target
 
 
+@multi_user_write_lock.translate_multi_user_write_contention
 @transaction.atomic
 def remove_owner(*, actor, business, membership, replacement_role):
+    _preauthorize_ownership_actor(actor_id=actor.pk, business_id=business.pk)
     (
         locked_business,
         memberships,
@@ -605,18 +733,6 @@ def remove_owner(*, actor, business, membership, replacement_role):
     target.save(update_fields=["role", "updated_at"])
     _assert_effective_owner(business=locked_business)
     return target
-
-
-def _membership_identity(public_id):
-    try:
-        return BusinessMembership.objects.only("pk", "business_id").get(
-            public_id=public_id,
-        )
-    except (BusinessMembership.DoesNotExist, ValueError) as exc:
-        raise MembershipDomainError(
-            "El recurso solicitado no se encuentra disponible.",
-            "not_found",
-        ) from exc
 
 
 def _valid_candidate_public_ids(values):
@@ -679,6 +795,7 @@ def _raise_if_targets_missing(targets_missing):
         )
 
 
+@multi_user_write_lock.translate_multi_user_write_contention
 @transaction.atomic
 def update_membership_by_public_id(
     *,
@@ -686,7 +803,10 @@ def update_membership_by_public_id(
     membership_public_id,
     validate_changes,
 ):
-    identity = _membership_identity(membership_public_id)
+    identity = _preauthorize_membership_mutation(
+        actor_id=actor.pk,
+        membership_public_id=membership_public_id,
+    )
     business, memberships, _, locked_actor, actor_membership = _locked_context(
         actor=actor,
         business_id=identity.business_id,
@@ -716,9 +836,13 @@ def update_membership_by_public_id(
     return target
 
 
+@multi_user_write_lock.translate_multi_user_write_contention
 @transaction.atomic
 def deactivate_membership_by_public_id(*, actor, membership_public_id):
-    identity = _membership_identity(membership_public_id)
+    identity = _preauthorize_membership_mutation(
+        actor_id=actor.pk,
+        membership_public_id=membership_public_id,
+    )
     business, memberships, _, locked_actor, actor_membership = _locked_context(
         actor=actor,
         business_id=identity.business_id,
@@ -742,6 +866,7 @@ def deactivate_membership_by_public_id(*, actor, membership_public_id):
     return target
 
 
+@multi_user_write_lock.translate_multi_user_write_contention
 @transaction.atomic
 def promote_to_owner_by_public_id(
     *,
@@ -750,6 +875,11 @@ def promote_to_owner_by_public_id(
     candidate_membership_public_id,
     validate_payload,
 ):
+    _preauthorize_ownership_actor(
+        actor_id=actor.pk,
+        business_public_id=business_public_id,
+    )
+    multi_user_write_lock.acquire_multi_user_write_lock()
     business = _lock_business_by_public_id(business_public_id)
     (
         locked_actor,
@@ -788,6 +918,7 @@ def promote_to_owner_by_public_id(
     return target
 
 
+@multi_user_write_lock.translate_multi_user_write_contention
 @transaction.atomic
 def transfer_ownership_by_public_id(
     *,
@@ -796,6 +927,11 @@ def transfer_ownership_by_public_id(
     candidate_membership_public_ids,
     validate_payload,
 ):
+    _preauthorize_ownership_actor(
+        actor_id=actor.pk,
+        business_public_id=business_public_id,
+    )
+    multi_user_write_lock.acquire_multi_user_write_lock()
     business = _lock_business_by_public_id(business_public_id)
     (
         locked_actor,
@@ -847,6 +983,7 @@ def transfer_ownership_by_public_id(
     return source, target
 
 
+@multi_user_write_lock.translate_multi_user_write_contention
 @transaction.atomic
 def remove_owner_by_public_id(
     *,
@@ -855,6 +992,11 @@ def remove_owner_by_public_id(
     membership_public_id,
     validate_payload,
 ):
+    _preauthorize_ownership_actor(
+        actor_id=actor.pk,
+        business_public_id=business_public_id,
+    )
+    multi_user_write_lock.acquire_multi_user_write_lock()
     business = _lock_business_by_public_id(business_public_id)
     (
         locked_actor,
@@ -895,6 +1037,7 @@ def remove_owner_by_public_id(
     return target
 
 
+@multi_user_write_lock.translate_multi_user_write_contention
 @transaction.atomic
 def deactivate_membership_in_business_by_public_id(
     *,
@@ -902,6 +1045,7 @@ def deactivate_membership_in_business_by_public_id(
     business_public_id,
     membership_public_id,
 ):
+    multi_user_write_lock.acquire_multi_user_write_lock()
     business = _lock_business_by_public_id(business_public_id)
     (
         locked_actor,

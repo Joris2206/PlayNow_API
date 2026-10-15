@@ -17,6 +17,7 @@ from drf_spectacular.utils import (
     extend_schema_view,
 )
 from drf_spectacular.extensions import OpenApiSerializerExtension
+from core.api.exception_handlers import MULTI_USER_WRITE_CONTENTION_OPENAPI_SCHEMA
 from django_filters import rest_framework as filters
 from core.services.customer_supplier_reports import build_customers_summary, build_suppliers_summary
 from core.services.commissions import (
@@ -766,6 +767,10 @@ def decimal_or_zero(value):
             403: OpenApiResponse(description="Operación no autorizada."),
             404: OpenApiResponse(description="Membership no visible."),
             409: OpenApiResponse(description="Conflicto de ownership concurrente."),
+            503: OpenApiResponse(
+                response=MULTI_USER_WRITE_CONTENTION_OPENAPI_SCHEMA,
+                description="El protocolo de escritura está temporalmente ocupado."
+            ),
         },
     ),
     destroy=extend_schema(
@@ -777,6 +782,10 @@ def decimal_or_zero(value):
             403: OpenApiResponse(description="Operación no autorizada."),
             404: OpenApiResponse(description="Membership no visible."),
             409: OpenApiResponse(description="Conflicto de ownership concurrente."),
+            503: OpenApiResponse(
+                response=MULTI_USER_WRITE_CONTENTION_OPENAPI_SCHEMA,
+                description="El protocolo de escritura está temporalmente ocupado."
+            ),
         },
     ),
 )
@@ -953,6 +962,10 @@ class BusinessMembershipViewSet(
             401: OpenApiResponse(description="Autenticación requerida."),
             403: OpenApiResponse(description="Operación no autorizada."),
             409: OpenApiResponse(description="Conflicto de provisioning."),
+            503: OpenApiResponse(
+                response=MULTI_USER_WRITE_CONTENTION_OPENAPI_SCHEMA,
+                description="El protocolo de escritura está temporalmente ocupado."
+            ),
         },
         examples=[BUSINESS_CREATE_EXAMPLE],
     ),
@@ -1224,6 +1237,10 @@ class BusinessViewSet(
             403: OpenApiResponse(description="OperaciÃ³n no autorizada."),
             404: OpenApiResponse(description="Business no visible."),
             409: OpenApiResponse(description="Membership existente o owner protegido."),
+            503: OpenApiResponse(
+                response=MULTI_USER_WRITE_CONTENTION_OPENAPI_SCHEMA,
+                description="El protocolo de escritura está temporalmente ocupado."
+            ),
         },
     )
     @action(
@@ -1314,6 +1331,10 @@ class BusinessViewSet(
             403: OpenApiResponse(description="Operación no autorizada."),
             404: OpenApiResponse(description="Business o membership no visible."),
             409: OpenApiResponse(description="Conflicto concurrente."),
+            503: OpenApiResponse(
+                response=MULTI_USER_WRITE_CONTENTION_OPENAPI_SCHEMA,
+                description="El protocolo de escritura está temporalmente ocupado."
+            ),
         },
     )
     @action(detail=True, methods=["post"], url_path="owners")
@@ -1357,6 +1378,10 @@ class BusinessViewSet(
             403: OpenApiResponse(description="Operación no autorizada."),
             404: OpenApiResponse(description="Business o membership no visible."),
             409: OpenApiResponse(description="Conflicto concurrente."),
+            503: OpenApiResponse(
+                response=MULTI_USER_WRITE_CONTENTION_OPENAPI_SCHEMA,
+                description="El protocolo de escritura está temporalmente ocupado."
+            ),
         },
     )
     @action(detail=True, methods=["post"], url_path="ownership-transfer")
@@ -1403,6 +1428,10 @@ class BusinessViewSet(
             403: OpenApiResponse(description="Operación no autorizada."),
             404: OpenApiResponse(description="Business o membership no visible."),
             409: OpenApiResponse(description="Último owner o conflicto concurrente."),
+            503: OpenApiResponse(
+                response=MULTI_USER_WRITE_CONTENTION_OPENAPI_SCHEMA,
+                description="El protocolo de escritura está temporalmente ocupado."
+            ),
         },
     )
     @action(
@@ -1453,6 +1482,10 @@ class BusinessViewSet(
         ),
         responses={
             204: None,
+            503: OpenApiResponse(
+                response=MULTI_USER_WRITE_CONTENTION_OPENAPI_SCHEMA,
+                description="El protocolo de escritura está temporalmente ocupado."
+            ),
         },
     )
     @action(

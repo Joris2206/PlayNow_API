@@ -11,9 +11,23 @@ from core.api.views.auth import LoginView
 
 audit_logger = logging.getLogger("audit")
 
-def log_action(user, action, entity_type, entity_id, extra=None):
+def log_action(
+    user,
+    action,
+    entity_type,
+    entity_id,
+    extra=None,
+    *,
+    actor_public_id=None,
+):
+    actor_identifier = (
+        actor_public_id
+        if actor_public_id is not None
+        else getattr(user, "id", None)
+    )
     audit_logger.info(
-        f"{action} {entity_type}={entity_id} by user={getattr(user, 'id', None)} extra={extra}"
+        f"{action} {entity_type}={entity_id} "
+        f"by user={actor_identifier} extra={extra}"
     )
 
 def calculate_employee_advance_summary(
