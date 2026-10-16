@@ -132,6 +132,47 @@ def business_administration_capabilities(*, actor, business):
     }
 
 
+def can_access_business_administration(*, actor_id):
+    qualifying_memberships = BusinessMembership.objects.filter(
+        user_id=OuterRef("pk"),
+        user__is_active=True,
+        is_active=True,
+    ).filter(
+        Q(
+            role=BusinessMembership.ROLE_OWNER,
+            business__status__name__iexact=ACTIVE_BUSINESS_STATUS,
+        )
+        | Q(
+            role=BusinessMembership.ROLE_OWNER,
+            business__status__name__iexact=INACTIVE_BUSINESS_STATUS,
+        )
+        | Q(
+            role=BusinessMembership.ROLE_ADMIN,
+            business__status__name__iexact=ACTIVE_BUSINESS_STATUS,
+        )
+    )
+    actor = (
+        User.objects.filter(pk=actor_id, is_active=True)
+        .annotate(
+            has_business_administration_membership=Exists(
+                qualifying_memberships
+            )
+        )
+        .values(
+            "is_superuser",
+            "has_business_administration_membership",
+        )
+        .first()
+    )
+    return bool(
+        actor
+        and (
+            actor["is_superuser"]
+            or actor["has_business_administration_membership"]
+        )
+    )
+
+
 @dataclass(frozen=True)
 class BusinessLifecycleError(Exception):
     detail: object

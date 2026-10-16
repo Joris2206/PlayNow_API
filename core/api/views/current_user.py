@@ -7,6 +7,9 @@ from rest_framework.views import APIView
 from core.api.serializers.current_user import CurrentUserSerializer
 from core.models import BusinessMembership
 from core.business_policy import ACTIVE_BUSINESS_STATUS
+from core.services.business_lifecycle import (
+    can_access_business_administration,
+)
 
 
 class CurrentUserView(APIView):
@@ -48,6 +51,9 @@ class CurrentUserView(APIView):
             "email": user.email,
             "full_name": user.full_name,
             "is_superuser": user.is_superuser,
+            "can_access_business_administration": (
+                can_access_business_administration(actor_id=user.pk)
+            ),
 
             "memberships": [
                 {

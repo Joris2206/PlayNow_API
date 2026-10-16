@@ -22,6 +22,9 @@ class CurrentUserSerializer(
     is_superuser = serializers.BooleanField(
         read_only=True,
     )
+    can_access_business_administration = serializers.BooleanField(
+        read_only=True,
+    )
 
     memberships = CurrentMembershipSerializer(
         many=True
