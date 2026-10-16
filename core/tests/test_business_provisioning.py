@@ -231,7 +231,7 @@ class BusinessProvisioningAPITests(APITestCase):
         ):
             self.assertIn(field, response.data)
 
-    def test_anonymous_is_rejected_and_explicit_status_is_preserved(self):
+    def test_anonymous_and_explicit_status_are_rejected(self):
         anonymous = self.client.post(
             reverse("business-list"),
             self.payload(),
@@ -244,9 +244,8 @@ class BusinessProvisioningAPITests(APITestCase):
             self.payload(status_public_id=str(self.inactive.public_id)),
             format="json",
         )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        business = Business.objects.get(public_id=response.data["public_id"])
-        self.assertEqual(business.status_id, self.inactive.pk)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("status_public_id", response.data)
 
     def test_openapi_documents_conditional_write_only_owner_email(self):
         schema = SchemaGenerator().get_schema(request=None, public=True)

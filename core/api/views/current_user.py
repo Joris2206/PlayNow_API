@@ -6,6 +6,7 @@ from rest_framework.views import APIView
 
 from core.api.serializers.current_user import CurrentUserSerializer
 from core.models import BusinessMembership
+from core.business_policy import ACTIVE_BUSINESS_STATUS
 
 
 class CurrentUserView(APIView):
@@ -35,6 +36,7 @@ class CurrentUserView(APIView):
             .filter(
                 user=user,
                 is_active=True,
+                business__status__name__iexact=ACTIVE_BUSINESS_STATUS,
             )
             .order_by(
                 "business__business_name",

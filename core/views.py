@@ -60,6 +60,19 @@ from core.services.business_users import (
     BusinessUserProvisioningError,
     provision_business_user,
 )
+from core.services.business_lifecycle import (
+    BusinessLifecycleError,
+    archive_business,
+    reactivate_business,
+    suspend_business,
+)
+from core.business_policy import (
+    ACTIVE_BUSINESS_STATUS,
+    DELETED_BUSINESS_STATUS,
+    INACTIVE_BUSINESS_STATUS,
+    normalized_status_name,
+    require_operational_business,
+)
 from .filters import (
     BusinessMembershipFilter,
     ConfiguredSearchFilter,
@@ -109,6 +122,7 @@ from .serializers import (
     DebtSummaryResponseSerializer,
     DebtSummaryQuerySerializer,
     EmployeeAccessCreateSerializer,
+    EmptyBusinessActionSerializer,
     ExistingBusinessMemberCreateSerializer,
     BusinessCreateSerializer,
     OwnerPromotionSerializer,
@@ -238,6 +252,16 @@ def _raise_membership_domain_error(exc):
 def _raise_business_provisioning_error(exc):
     if exc.kind == "forbidden":
         raise PermissionDenied(exc.detail)
+    if exc.kind == "conflict":
+        raise MembershipConflict(exc.detail)
+    raise ValidationError(exc.detail)
+
+
+def _raise_business_lifecycle_error(exc):
+    if exc.kind == "forbidden":
+        raise PermissionDenied(exc.detail)
+    if exc.kind == "not_found":
+        raise NotFound(exc.detail)
     if exc.kind == "conflict":
         raise MembershipConflict(exc.detail)
     raise ValidationError(exc.detail)
@@ -390,10 +414,10 @@ def get_commission_create_business(request):
     if user.is_superuser:
         if not raw_business_public_id:
             return None
-        return get_object_or_404(
+        return require_operational_business(get_object_or_404(
             Business,
             public_id=raw_business_public_id,
-        )
+        ))
 
     active_memberships = (
         BusinessMembership.objects
@@ -401,6 +425,7 @@ def get_commission_create_business(request):
         .filter(
             user=user,
             is_active=True,
+            business__status__name__iexact=ACTIVE_BUSINESS_STATUS,
         )
     )
 
@@ -838,6 +863,8 @@ class BusinessMembershipViewSet(
             "employee",
             "employee__status",
             "business",
+        ).filter(
+            business__status__name__iexact=ACTIVE_BUSINESS_STATUS,
         ).annotate(
             user_email=F("user__email"),
             user_full_name=F("user__full_name"),
@@ -873,6 +900,7 @@ class BusinessMembershipViewSet(
         actor_id = request.user.pk
         authorized_businesses = (
             Business.objects.filter(public_id=business_public_id)
+            .filter(status__name__iexact=ACTIVE_BUSINESS_STATUS)
             .annotate(
                 actor_is_platform_admin=Exists(
                     User.objects.filter(
@@ -979,7 +1007,7 @@ class BusinessMembershipViewSet(
     ),
     destroy=extend_schema(
         tags=["Businesses"],
-        summary="Desactivar un negocio",
+        summary="Archivar un negocio",
     ),
 )
 class BusinessViewSet(
@@ -1057,11 +1085,33 @@ class BusinessViewSet(
 
         return (
             queryset
-            .filter(
-                memberships__user=user,
-                memberships__is_active=True,
+            .annotate(
+                actor_has_active_membership=Exists(
+                    BusinessMembership.objects.filter(
+                        business_id=OuterRef("pk"),
+                        user=user,
+                        is_active=True,
+                    )
+                ),
+                actor_is_effective_owner=Exists(
+                    BusinessMembership.objects.filter(
+                        business_id=OuterRef("pk"),
+                        user=user,
+                        is_active=True,
+                        role=BusinessMembership.ROLE_OWNER,
+                    )
+                ),
             )
-            .distinct()
+            .filter(
+                Q(
+                    status__name__iexact=ACTIVE_BUSINESS_STATUS,
+                    actor_has_active_membership=True,
+                )
+                | Q(
+                    status__name__iexact=INACTIVE_BUSINESS_STATUS,
+                    actor_is_effective_owner=True,
+                )
+            )
         )
 
     def _validate_management_access(
@@ -1127,6 +1177,11 @@ class BusinessViewSet(
     ):
         business = self.get_object()
 
+        if normalized_status_name(business) == DELETED_BUSINESS_STATUS.casefold():
+            raise MembershipConflict(
+                "Un negocio archivado no puede modificarse."
+            )
+
         self._validate_management_access(
             business
         )
@@ -1147,6 +1202,75 @@ class BusinessViewSet(
         self._validate_management_access(
             business
         )
+
+    def _run_lifecycle_action(self, request, operation):
+        payload = EmptyBusinessActionSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            business = operation(
+                actor_id=request.user.pk,
+                business_public_id=self.kwargs[self.lookup_url_kwarg],
+            )
+        except BusinessLifecycleError as exc:
+            _raise_business_lifecycle_error(exc)
+        return Response(
+            BusinessSerializer(business, context={"request": request}).data,
+            status=status.HTTP_200_OK,
+        )
+
+    @extend_schema(
+        tags=["Businesses"],
+        summary="Suspender un negocio",
+        description=(
+            "Cambia un Business Activo a Inactivo. Es idempotente cuando "
+            "ya esta Inactivo y no elimina relaciones ni historial."
+        ),
+        request=EmptyBusinessActionSerializer,
+        responses={
+            200: BusinessSerializer,
+            400: OpenApiResponse(description="El body debe estar vacio."),
+            401: OpenApiResponse(description="Autenticacion requerida."),
+            403: OpenApiResponse(description="Rol insuficiente."),
+            404: OpenApiResponse(description="Business no visible."),
+            409: OpenApiResponse(description="Transicion o configuracion invalida."),
+        },
+    )
+    @action(detail=True, methods=["post"], url_path="suspend")
+    def suspend(self, request, public_id=None):
+        return self._run_lifecycle_action(request, suspend_business)
+
+    @extend_schema(
+        tags=["Businesses"],
+        summary="Reactivar un negocio",
+        description=(
+            "Cambia un Business Inactivo a Activo. Es idempotente cuando "
+            "ya esta Activo y rechaza Businesses archivados."
+        ),
+        request=EmptyBusinessActionSerializer,
+        responses={
+            200: BusinessSerializer,
+            400: OpenApiResponse(description="El body debe estar vacio."),
+            401: OpenApiResponse(description="Autenticacion requerida."),
+            403: OpenApiResponse(description="Rol insuficiente."),
+            404: OpenApiResponse(description="Business no visible."),
+            409: OpenApiResponse(description="Transicion o configuracion invalida."),
+        },
+    )
+    @action(detail=True, methods=["post"], url_path="reactivate")
+    def reactivate(self, request, public_id=None):
+        return self._run_lifecycle_action(request, reactivate_business)
+
+    def destroy(self, request, *args, **kwargs):
+        payload = EmptyBusinessActionSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            archive_business(
+                actor_id=request.user.pk,
+                business_public_id=kwargs[self.lookup_url_kwarg],
+            )
+        except BusinessLifecycleError as exc:
+            _raise_business_lifecycle_error(exc)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @extend_schema(
         tags=["Business Access"],
@@ -1174,6 +1298,7 @@ class BusinessViewSet(
         public_id=None,
     ):
         business = self.get_object()
+        require_operational_business(business)
 
         self._validate_management_access(
             business
@@ -1593,7 +1718,10 @@ class PublicProductCategoryViewSet(
     queryset = (
         ProductCategory.objects
         .select_related("business")
-        .filter(status__name__iexact="Activo")
+        .filter(
+            status__name__iexact="Activo",
+            business__status__name__iexact=ACTIVE_BUSINESS_STATUS,
+        )
     )
     serializer_class = PublicProductCategorySerializer
     business_lookup = "business"
@@ -1627,6 +1755,7 @@ class PublicProductViewSet(
         .filter(
             status__name__iexact="Activo",
             is_visible=True,
+            business__status__name__iexact=ACTIVE_BUSINESS_STATUS,
         )
     )
     serializer_class = PublicProductSerializer
@@ -2499,6 +2628,9 @@ class EmployeeCommissionPlanViewSet(
             "employee",
             "employee__business",
         )
+        .filter(
+            employee__business__status__name__iexact=ACTIVE_BUSINESS_STATUS,
+        )
         .order_by(
             "-valid_from",
             "-created_at",
@@ -3155,6 +3287,9 @@ class CommissionSettlementViewSet(
             "employee__business",
             "created_by",
         )
+        .filter(
+            employee__business__status__name__iexact=ACTIVE_BUSINESS_STATUS,
+        )
         .order_by(
             "-period_end",
             "-created_at",
@@ -3249,6 +3384,7 @@ class CommissionSettlementViewSet(
         self,
         business,
     ):
+        require_operational_business(business)
         user = self.request.user
 
         if user.is_superuser:
@@ -3513,6 +3649,7 @@ class CashRegisterViewSet(
             "opened_by",
             "closed_by",
         )
+        .filter(business__status__name__iexact=ACTIVE_BUSINESS_STATUS)
         .order_by("-open_time")
     )
 
@@ -3605,6 +3742,7 @@ class CashRegisterViewSet(
         *,
         roles=None,
     ):
+        require_operational_business(business)
         user = self.request.user
 
         if user.is_superuser:
@@ -3908,6 +4046,11 @@ class CashMovementViewSet(
             "payment_method",
             "created_by",
         )
+        .filter(
+            cash_register__business__status__name__iexact=(
+                ACTIVE_BUSINESS_STATUS
+            ),
+        )
         .order_by("-created_at")
     )
 
@@ -3991,6 +4134,7 @@ class CashMovementViewSet(
         self,
         business,
     ):
+        require_operational_business(business)
         user = self.request.user
 
         if user.is_superuser:
@@ -4171,6 +4315,7 @@ class MonthlyClosureViewSet(
             "closed_by",
             "reopened_by",
         )
+        .filter(business__status__name__iexact=ACTIVE_BUSINESS_STATUS)
         .order_by(
             "-year",
             "-month",
@@ -4266,6 +4411,7 @@ class MonthlyClosureViewSet(
         self,
         business,
     ):
+        require_operational_business(business)
         user = self.request.user
 
         if user.is_superuser:

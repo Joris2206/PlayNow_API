@@ -21,6 +21,7 @@ from core.models import (
     Business,
     BusinessMembership,
 )
+from core.business_policy import filter_operational_businesses
 
 class SoftDeleteByStatusMixin:
     """
@@ -170,7 +171,10 @@ class RequireBusinessPublicIdListMixin:
             })
 
         return get_object_or_404(
-            Business,
+            filter_operational_businesses(
+                Business.objects.all(),
+                lookup="",
+            ),
             public_id=business_public_id,
         )
 

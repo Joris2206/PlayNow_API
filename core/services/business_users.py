@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from django.db import IntegrityError, transaction
 
 from core.models import Business, BusinessMembership, User
+from core.business_policy import is_business_operational
 from core.services.business_memberships import NON_OWNER_ROLES
 from core.utils import log_action
 
@@ -72,16 +73,7 @@ def _lock_actor(actor_id):
 
 
 def _business_is_visible(business):
-    status_name = business.status.name.strip().casefold()
-    return status_name not in {
-        "eliminado",
-        "eliminada",
-        "deleted",
-        "anulado",
-        "anulada",
-        "cancelado",
-        "cancelada",
-    }
+    return is_business_operational(business)
 
 
 def _authorize(*, business, actor, actor_membership):

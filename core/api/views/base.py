@@ -6,6 +6,10 @@ from rest_framework.throttling import ScopedRateThrottle
 
 from core.mixins import RequireBusinessPublicIdListMixin
 from core.models import BusinessMembership, EntityStatus
+from core.business_policy import (
+    filter_operational_businesses,
+    require_operational_business,
+)
 from core.permissions import IsOwnerOrBusinessOwner
 from core.utils import log_action
 
@@ -190,6 +194,8 @@ class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelView
         if business is None:
             return False
 
+        require_operational_business(business)
+
         if self._is_platform_admin(user):
             return True
 
@@ -233,6 +239,8 @@ class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelView
             raise PermissionDenied(
                 "Debes indicar un negocio válido."
             )
+
+        require_operational_business(business)
 
         has_access = (
             self._user_can_access_business(
@@ -441,6 +449,12 @@ class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelView
         business_lookup = (
             self._get_business_lookup()
         )
+
+        if business_lookup:
+            queryset = filter_operational_businesses(
+                queryset,
+                business_lookup,
+            )
 
         owner_lookup = getattr(
             self,

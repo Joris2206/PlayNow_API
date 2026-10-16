@@ -5,6 +5,7 @@ from django.db import transaction
 from django.db.models import Exists, OuterRef, Q
 
 from core.models import Business, BusinessMembership, User
+from core.business_policy import is_business_operational
 from core.services import multi_user_write_lock
 
 
@@ -15,6 +16,15 @@ NON_OWNER_ROLES = frozenset({
     BusinessMembership.ROLE_INVENTORY,
     BusinessMembership.ROLE_VIEWER,
 })
+
+
+def _require_operational_business(business):
+    if not is_business_operational(business):
+        raise MembershipDomainError(
+            "El recurso solicitado no se encuentra disponible.",
+            "not_found",
+        )
+    return business
 
 LOWER_ROLES = frozenset({
     BusinessMembership.ROLE_CASHIER,
@@ -35,7 +45,11 @@ class MembershipDomainError(Exception):
 
 def _lock_business(business_id):
     try:
-        return Business.objects.select_for_update().get(pk=business_id)
+        return _require_operational_business(
+            Business.objects.select_for_update().select_related("status").get(
+                pk=business_id
+            )
+        )
     except Business.DoesNotExist as exc:
         raise MembershipDomainError(
             "El negocio ya no se encuentra disponible.",
@@ -45,7 +59,11 @@ def _lock_business(business_id):
 
 def _lock_business_by_public_id(public_id):
     try:
-        return Business.objects.select_for_update().get(public_id=public_id)
+        return _require_operational_business(
+            Business.objects.select_for_update().select_related("status").get(
+                public_id=public_id
+            )
+        )
     except (Business.DoesNotExist, ValueError) as exc:
         raise MembershipDomainError(
             "El recurso solicitado no se encuentra disponible.",

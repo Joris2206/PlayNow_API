@@ -191,11 +191,7 @@ class BusinessSerializer(
     DefaultActiveStatusMixin,
     serializers.ModelSerializer,
 ):
-    status_public_id = public_id_field(
-        EntityStatus,
-        source="status",
-        required=False,
-    )
+    status_public_id = public_id_read_only(source="status")
     status_name = related_name_field("status.name")
     class Meta:
         model = Business
@@ -211,9 +207,18 @@ class BusinessSerializer(
         )
         read_only_fields = (
             "public_id",
+            "status_public_id",
+            "status_name",
             "created_at",
             "updated_at",
         )
+
+    def to_internal_value(self, data):
+        if hasattr(data, "keys") and "status_public_id" in data:
+            raise serializers.ValidationError({
+                "status_public_id": "Este campo no esta permitido."
+            })
+        return super().to_internal_value(data)
 
 class BusinessMembershipSerializer(serializers.ModelSerializer):
     user_email = serializers.EmailField(
@@ -334,6 +339,13 @@ class StrictFieldsSerializerMixin:
         return super().to_internal_value(data)
 
 
+class EmptyBusinessActionSerializer(
+    StrictFieldsSerializerMixin,
+    serializers.Serializer,
+):
+    pass
+
+
 class BusinessUserCreateSerializer(
     StrictFieldsSerializerMixin,
     serializers.Serializer,
@@ -435,7 +447,7 @@ class BusinessCreateSerializer(
         return value.strip().lower()
 
     def validate(self, attrs):
-        attrs.setdefault("status", get_active_status())
+        attrs["status"] = get_active_status()
         return super().validate(attrs)
 
 

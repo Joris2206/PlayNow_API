@@ -5,6 +5,7 @@ from core.models import (
     BusinessMembership,
     User,
 )
+from core.business_policy import require_operational_business
 
 
 def get_business_from_object(obj):
@@ -157,12 +158,12 @@ class HasBusinessMembership(BasePermission):
     ):
         user = request.user
 
+        business = get_business_from_object(obj)
+        if business is not None:
+            require_operational_business(business)
+
         if user.is_superuser:
             return True
-
-        business = get_business_from_object(
-            obj
-        )
 
         if business is None:
             return False
@@ -389,6 +390,10 @@ class IsOwnerOrBusinessOwner(BasePermission):
     ):
         user = request.user
 
+        business = get_business_from_object(obj)
+        if business is not None:
+            require_operational_business(business)
+
         if user.is_superuser:
             return True
 
@@ -410,10 +415,6 @@ class IsOwnerOrBusinessOwner(BasePermission):
         if hasattr(obj, "user"):
             if obj.user_id == user.id:
                 return True
-
-        business = get_business_from_object(
-            obj
-        )
 
         if business is None:
             return False

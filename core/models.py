@@ -135,6 +135,11 @@ class Business(models.Model):
         if user is None or not user.is_authenticated:
             return False
 
+        from core.business_policy import is_business_operational
+
+        if not is_business_operational(self):
+            return False
+
         if user.is_superuser:
             return True
 

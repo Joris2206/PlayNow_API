@@ -1,6 +1,7 @@
 from rest_framework.exceptions import PermissionDenied
 
 from core.models import BusinessMembership
+from core.business_policy import require_operational_business
 
 def validate_report_business_access(
     *,
@@ -8,6 +9,8 @@ def validate_report_business_access(
     business,
     allowed_roles=None,
 ):
+    require_operational_business(business)
+
     if user.is_superuser:
         return
 
