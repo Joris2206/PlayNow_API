@@ -55,6 +55,7 @@ BUSINESS_CREATE_EXAMPLE = OpenApiExample(
         "business_name": "Variedades La Esperanza",
         "description": "Venta de ropa, calzado y artículos para el hogar.",
         "currency": "NIO",
+        "initial_owner_email": "owner@example.com",
     },
     request_only=True,
 )

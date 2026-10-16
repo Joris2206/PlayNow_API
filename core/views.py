@@ -62,7 +62,9 @@ from core.services.business_users import (
 )
 from core.services.business_lifecycle import (
     BusinessLifecycleError,
+    annotate_business_actor_authority,
     archive_business,
+    business_administration_capabilities,
     reactivate_business,
     suspend_business,
 )
@@ -124,6 +126,7 @@ from .serializers import (
     EmployeeAccessCreateSerializer,
     EmptyBusinessActionSerializer,
     ExistingBusinessMemberCreateSerializer,
+    BusinessAdministrationSerializer,
     BusinessCreateSerializer,
     OwnerPromotionSerializer,
     OwnerRemovalSerializer,
@@ -231,7 +234,11 @@ from .serializers import (
     BudgetSerializer, GoalSerializer, GoalProgressSerializer, 
     CommissionSettlementCreateSerializer, CommissionSettlementSerializer, EmployeeCommissionPlanSerializer,
 )
-from .permissions import CanManageInventory, IsOwnerOrBusinessOwner
+from .permissions import (
+    CanManageInventory,
+    IsActivePlatformAdmin,
+    IsOwnerOrBusinessOwner,
+)
 
 
 class MembershipConflict(APIException):
@@ -979,9 +986,9 @@ class BusinessMembershipViewSet(
         tags=["Businesses"],
         summary="Crear un negocio",
         description=(
-            "Un usuario normal crea el negocio y recibe su membership owner. "
-            "Un Platform Admin debe enviar initial_owner_email para asignar "
-            "un User activo existente como owner inicial."
+            "Exclusivo de Platform Admin activo. initial_owner_email debe "
+            "identificar un User activo existente que recibirá la única "
+            "membership owner inicial."
         ),
         request=BusinessCreateSerializer,
         responses={
@@ -1056,7 +1063,14 @@ class BusinessViewSet(
     def get_serializer_class(self):
         if self.action == "create":
             return BusinessCreateSerializer
+        if self.action in {"list", "retrieve"}:
+            return BusinessAdministrationSerializer
         return BusinessSerializer
+
+    def get_permissions(self):
+        if self.action == "create":
+            return [IsActivePlatformAdmin()]
+        return super().get_permissions()
 
     def get_throttles(self):
         self.throttle_scope = (
@@ -1080,30 +1094,16 @@ class BusinessViewSet(
         if not user.is_authenticated:
             return queryset.none()
 
-        if user.is_superuser:
-            return queryset
+        queryset = annotate_business_actor_authority(
+            queryset,
+            actor_id=user.pk,
+        )
 
         return (
             queryset
-            .annotate(
-                actor_has_active_membership=Exists(
-                    BusinessMembership.objects.filter(
-                        business_id=OuterRef("pk"),
-                        user=user,
-                        is_active=True,
-                    )
-                ),
-                actor_is_effective_owner=Exists(
-                    BusinessMembership.objects.filter(
-                        business_id=OuterRef("pk"),
-                        user=user,
-                        is_active=True,
-                        role=BusinessMembership.ROLE_OWNER,
-                    )
-                ),
-            )
             .filter(
-                Q(
+                Q(actor_is_active_platform_admin=True)
+                | Q(
                     status__name__iexact=ACTIVE_BUSINESS_STATUS,
                     actor_has_active_membership=True,
                 )
@@ -1182,9 +1182,15 @@ class BusinessViewSet(
                 "Un negocio archivado no puede modificarse."
             )
 
-        self._validate_management_access(
-            business
+        capabilities = business_administration_capabilities(
+            actor=self.request.user,
+            business=business,
         )
+        if not capabilities["can_edit"]:
+            raise PermissionDenied(
+                "Solo el propietario o un administrador puede modificar "
+                "este negocio."
+            )
 
         obj = serializer.save()
 

@@ -35,20 +35,23 @@ def _candidate_owner_ids(email):
     )
 
 
-def _lock_users(user_ids):
-    ordered_ids = sorted(set(user_ids))
-    users = list(
-        User.objects.select_for_update()
-        .filter(pk__in=ordered_ids)
-        .order_by("pk")
-    )
-    by_id = {user.pk: user for user in users}
-    if len(by_id) != len(ordered_ids):
+def _lock_actor(actor_id):
+    try:
+        return User.objects.select_for_update().get(pk=actor_id)
+    except User.DoesNotExist as exc:
         raise BusinessProvisioningError(
             "La cuenta autenticada ya no se encuentra disponible.",
             "forbidden",
-        )
-    return by_id
+        ) from exc
+
+
+def _lock_initial_owner(*, owner_id, locked_actor):
+    if owner_id == locked_actor.pk:
+        return locked_actor
+    try:
+        return User.objects.select_for_update().get(pk=owner_id)
+    except User.DoesNotExist as exc:
+        raise _initial_owner_error() from exc
 
 
 def _has_effective_owner(business):
@@ -80,41 +83,34 @@ def provision_business(
     validated_business_data,
     initial_owner_email=None,
 ):
-    requested_admin_mode = initial_owner_email is not None
-    if requested_admin_mode:
-        _preauthorize_administrative_provisioning(actor.pk)
-        multi_user_write_lock.acquire_multi_user_write_lock()
-    candidate_ids = _candidate_owner_ids(initial_owner_email)
-    locked_users = _lock_users([actor.pk, *candidate_ids])
-    locked_actor = locked_users[actor.pk]
+    _preauthorize_administrative_provisioning(actor.pk)
+    multi_user_write_lock.acquire_multi_user_write_lock()
+    locked_actor = _lock_actor(actor.pk)
 
-    if not locked_actor.is_active:
+    if not locked_actor.is_active or not locked_actor.is_superuser:
         raise BusinessProvisioningError(
-            "La cuenta autenticada no puede crear negocios.",
+            "La operación administrativa ya no está autorizada.",
             "forbidden",
         )
-    if requested_admin_mode:
-        if not locked_actor.is_superuser:
-            raise BusinessProvisioningError(
-                "La operación administrativa ya no está autorizada.",
-                "forbidden",
-            )
-        if len(candidate_ids) != 1:
-            raise _initial_owner_error()
-        locked_owner = locked_users[candidate_ids[0]]
-        if (
-            not locked_owner.is_active
-            or locked_owner.email.strip().casefold()
-            != initial_owner_email.strip().casefold()
-        ):
-            raise _initial_owner_error()
-    else:
-        if locked_actor.is_superuser:
-            raise BusinessProvisioningError(
-                {"initial_owner_email": ["Este campo es obligatorio."]},
-                "invalid",
-            )
-        locked_owner = locked_actor
+
+    if initial_owner_email is None:
+        raise BusinessProvisioningError(
+            {"initial_owner_email": ["Este campo es obligatorio."]},
+            "invalid",
+        )
+    candidate_ids = _candidate_owner_ids(initial_owner_email)
+    if len(candidate_ids) != 1:
+        raise _initial_owner_error()
+    locked_owner = _lock_initial_owner(
+        owner_id=candidate_ids[0],
+        locked_actor=locked_actor,
+    )
+    if (
+        not locked_owner.is_active
+        or locked_owner.email.strip().casefold()
+        != initial_owner_email.strip().casefold()
+    ):
+        raise _initial_owner_error()
 
     business = Business.objects.create(
         user=locked_actor,

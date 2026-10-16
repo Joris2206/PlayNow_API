@@ -39,6 +39,9 @@ from core.services.financial_flows import (
     exclude_terminal_transactions,
     is_terminal_transaction_status,
 )
+from core.services.business_lifecycle import (
+    business_administration_capabilities,
+)
 from core.services.commissions import (
     CommissionDomainError,
     validate_commission_plan_candidate,
@@ -214,11 +217,40 @@ class BusinessSerializer(
         )
 
     def to_internal_value(self, data):
-        if hasattr(data, "keys") and "status_public_id" in data:
-            raise serializers.ValidationError({
-                "status_public_id": "Este campo no esta permitido."
-            })
+        if hasattr(data, "keys"):
+            forbidden = {
+                field: "Este campo no esta permitido."
+                for field in ("status_public_id", "capabilities")
+                if field in data
+            }
+            if forbidden:
+                raise serializers.ValidationError(forbidden)
         return super().to_internal_value(data)
+
+
+class BusinessCapabilitiesSerializer(serializers.Serializer):
+    can_edit = serializers.BooleanField(read_only=True)
+    can_suspend = serializers.BooleanField(read_only=True)
+    can_reactivate = serializers.BooleanField(read_only=True)
+    can_archive = serializers.BooleanField(read_only=True)
+
+
+class BusinessAdministrationSerializer(BusinessSerializer):
+    capabilities = serializers.SerializerMethodField()
+
+    class Meta(BusinessSerializer.Meta):
+        fields = (*BusinessSerializer.Meta.fields, "capabilities")
+        read_only_fields = (
+            *BusinessSerializer.Meta.read_only_fields,
+            "capabilities",
+        )
+
+    @extend_schema_field(BusinessCapabilitiesSerializer)
+    def get_capabilities(self, business):
+        return business_administration_capabilities(
+            actor=self.context["request"].user,
+            business=business,
+        )
 
 class BusinessMembershipSerializer(serializers.ModelSerializer):
     user_email = serializers.EmailField(
@@ -432,11 +464,11 @@ class BusinessCreateSerializer(
 ):
     initial_owner_email = serializers.EmailField(
         write_only=True,
-        required=False,
+        required=True,
         max_length=254,
         help_text=(
-            "Obligatorio para Platform Admin. Debe corresponder exactamente "
-            "a un User activo existente. Los usuarios normales no deben enviarlo."
+            "Debe corresponder exactamente, sin distinguir mayúsculas, "
+            "a un User activo existente."
         ),
     )
 

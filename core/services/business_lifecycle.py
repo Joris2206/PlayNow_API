@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from django.db import transaction
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, IntegerField, OuterRef, Q, Value
 
 from core.business_policy import (
     ACTIVE_BUSINESS_STATUS,
@@ -17,6 +17,122 @@ HIDDEN_RESOURCE = "El recurso solicitado no se encuentra disponible."
 
 
 @dataclass(frozen=True)
+class BusinessActorAuthority:
+    actor_is_active: bool
+    actor_is_platform_admin: bool
+    actor_has_active_membership: bool
+    actor_is_effective_owner: bool
+    actor_is_effective_admin: bool
+
+
+def annotate_business_actor_authority(queryset, *, actor_id):
+    active_actor = User.objects.filter(pk=actor_id, is_active=True)
+    active_memberships = BusinessMembership.objects.filter(
+        business_id=OuterRef("pk"),
+        user_id=actor_id,
+        user__is_active=True,
+        is_active=True,
+    )
+    return queryset.annotate(
+        capability_actor_id=Value(actor_id, output_field=IntegerField()),
+        actor_is_active=Exists(active_actor),
+        actor_is_active_platform_admin=Exists(
+            active_actor.filter(is_superuser=True)
+        ),
+        actor_has_active_membership=Exists(active_memberships),
+        actor_is_effective_owner=Exists(
+            active_memberships.filter(role=BusinessMembership.ROLE_OWNER)
+        ),
+        actor_is_effective_admin=Exists(
+            active_memberships.filter(role=BusinessMembership.ROLE_ADMIN)
+        ),
+    )
+
+
+def _annotated_authority(*, actor_id, business):
+    if getattr(business, "capability_actor_id", None) != actor_id:
+        raise RuntimeError("Business actor authority was not annotated.")
+    return BusinessActorAuthority(
+        actor_is_active=business.actor_is_active,
+        actor_is_platform_admin=business.actor_is_active_platform_admin,
+        actor_has_active_membership=business.actor_has_active_membership,
+        actor_is_effective_owner=business.actor_is_effective_owner,
+        actor_is_effective_admin=business.actor_is_effective_admin,
+    )
+
+
+def _locked_authority(*, actor, membership):
+    actor_is_active = bool(actor.is_active)
+    membership_is_effective = bool(
+        actor_is_active
+        and membership is not None
+        and membership.is_active
+    )
+    return BusinessActorAuthority(
+        actor_is_active=actor_is_active,
+        actor_is_platform_admin=bool(
+            actor_is_active and actor.is_superuser
+        ),
+        actor_has_active_membership=membership_is_effective,
+        actor_is_effective_owner=bool(
+            membership_is_effective
+            and membership.role == BusinessMembership.ROLE_OWNER
+        ),
+        actor_is_effective_admin=bool(
+            membership_is_effective
+            and membership.role == BusinessMembership.ROLE_ADMIN
+        ),
+    )
+
+
+def _can_change_lifecycle(authority):
+    return (
+        authority.actor_is_platform_admin
+        or authority.actor_is_effective_owner
+    )
+
+
+def _can_edit_business(*, business, authority):
+    current = normalized_status_name(business)
+    if current == DELETED_BUSINESS_STATUS.casefold():
+        return False
+    if authority.actor_is_platform_admin:
+        return True
+    if current == ACTIVE_BUSINESS_STATUS.casefold():
+        return (
+            authority.actor_is_effective_owner
+            or authority.actor_is_effective_admin
+        )
+    if current == INACTIVE_BUSINESS_STATUS.casefold():
+        return authority.actor_is_effective_owner
+    return False
+
+
+def business_administration_capabilities(*, actor, business):
+    authority = _annotated_authority(actor_id=actor.pk, business=business)
+    current = normalized_status_name(business)
+    can_change_lifecycle = _can_change_lifecycle(authority)
+    is_deleted = current == DELETED_BUSINESS_STATUS.casefold()
+    return {
+        "can_edit": _can_edit_business(
+            business=business,
+            authority=authority,
+        ),
+        "can_suspend": bool(
+            can_change_lifecycle
+            and current == ACTIVE_BUSINESS_STATUS.casefold()
+        ),
+        "can_reactivate": bool(
+            can_change_lifecycle
+            and current == INACTIVE_BUSINESS_STATUS.casefold()
+        ),
+        "can_archive": bool(
+            authority.actor_is_platform_admin and not is_deleted
+        ),
+    }
+
+
+@dataclass(frozen=True)
 class BusinessLifecycleError(Exception):
     detail: object
     kind: str
@@ -26,43 +142,28 @@ class BusinessLifecycleError(Exception):
 
 
 def _preauthorize(*, actor_id, business_public_id, platform_only=False):
-    actor_is_platform_admin = User.objects.filter(
-        pk=actor_id,
-        is_active=True,
-        is_superuser=True,
-    ).exists()
+    candidates = annotate_business_actor_authority(
+        Business.objects.filter(public_id=business_public_id),
+        actor_id=actor_id,
+    ).filter(
+        Q(actor_is_active_platform_admin=True)
+        | Q(actor_has_active_membership=True)
+    )
     candidates = (
-        Business.objects.filter(public_id=business_public_id)
-        .annotate(
-            actor_is_effective_owner=Exists(
-                BusinessMembership.objects.filter(
-                    business_id=OuterRef("pk"),
-                    user_id=actor_id,
-                    user__is_active=True,
-                    is_active=True,
-                    role=BusinessMembership.ROLE_OWNER,
-                )
-            ),
-            actor_has_active_membership=Exists(
-                BusinessMembership.objects.filter(
-                    business_id=OuterRef("pk"),
-                    user_id=actor_id,
-                    user__is_active=True,
-                    is_active=True,
-                )
-            ),
-        )
+        candidates
         .select_related("status")
         .only("pk", "status__name")
     )
-    if not actor_is_platform_admin:
-        candidates = candidates.filter(actor_has_active_membership=True)
     try:
         candidate = candidates.get()
     except (Business.DoesNotExist, ValueError) as exc:
         raise BusinessLifecycleError(HIDDEN_RESOURCE, "not_found") from exc
 
-    if actor_is_platform_admin:
+    authority = _annotated_authority(
+        actor_id=actor_id,
+        business=candidate,
+    )
+    if authority.actor_is_platform_admin:
         return candidate.pk
     if normalized_status_name(candidate) == DELETED_BUSINESS_STATUS.casefold():
         raise BusinessLifecycleError(HIDDEN_RESOURCE, "not_found")
@@ -71,7 +172,7 @@ def _preauthorize(*, actor_id, business_public_id, platform_only=False):
             "Solo un Platform Admin puede archivar un negocio.",
             "forbidden",
         )
-    if not candidate.actor_is_effective_owner:
+    if not authority.actor_is_effective_owner:
         raise BusinessLifecycleError(
             "Solo un owner efectivo o Platform Admin puede cambiar el estado del negocio.",
             "forbidden",
@@ -112,18 +213,19 @@ def _lock_context(*, actor_id, business_id):
 
 
 def _reauthorize(*, actor, membership, platform_only=False):
-    if not actor.is_active:
+    authority = _locked_authority(actor=actor, membership=membership)
+    if not authority.actor_is_active:
         raise BusinessLifecycleError(HIDDEN_RESOURCE, "not_found")
-    if actor.is_superuser:
+    if authority.actor_is_platform_admin:
         return
-    if membership is None or not membership.is_active:
+    if not authority.actor_has_active_membership:
         raise BusinessLifecycleError(HIDDEN_RESOURCE, "not_found")
     if platform_only:
         raise BusinessLifecycleError(
             "Solo un Platform Admin puede archivar un negocio.",
             "forbidden",
         )
-    if membership.role != BusinessMembership.ROLE_OWNER:
+    if not _can_change_lifecycle(authority):
         raise BusinessLifecycleError(
             "Solo un owner efectivo o Platform Admin puede cambiar el estado del negocio.",
             "forbidden",

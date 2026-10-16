@@ -17,7 +17,12 @@ from core.services.business_provisioning import (
     BusinessProvisioningError,
     provision_business,
 )
-from core.tests.factories import create_business, create_status, create_user
+from core.tests.factories import (
+    create_business,
+    create_membership,
+    create_status,
+    create_user,
+)
 
 
 class BusinessProvisioningAPITests(APITestCase):
@@ -37,13 +42,45 @@ class BusinessProvisioningAPITests(APITestCase):
             user=cls.other_creator,
             status=cls.active,
         )
+        cls.local_actors = []
+        for role in (
+            BusinessMembership.ROLE_OWNER,
+            BusinessMembership.ROLE_ADMIN,
+            BusinessMembership.ROLE_CASHIER,
+            BusinessMembership.ROLE_SELLER,
+            BusinessMembership.ROLE_INVENTORY,
+            BusinessMembership.ROLE_VIEWER,
+        ):
+            actor = create_user(email=f"provision-local-{role}@playnow.test")
+            create_membership(
+                user=actor,
+                business=cls.other_business,
+                role=role,
+            )
+            cls.local_actors.append(actor)
+        cls.global_role_actors = [
+            create_user(
+                email=f"provision-global-{role}@playnow.test",
+                role=role,
+            )
+            for role in User.Roles.values
+        ]
+        cls.staff_only = create_user(email="provision-staff@playnow.test")
+        User.objects.filter(pk=cls.staff_only.pk).update(is_staff=True)
+        cls.inactive_platform = create_user(
+            email="provision-inactive-platform@playnow.test",
+            is_superuser=True,
+        )
+        User.objects.filter(pk=cls.inactive_platform.pk).update(is_active=False)
 
-    def payload(self, **overrides):
+    def payload(self, *, include_owner=True, **overrides):
         data = {
             "business_name": "Provisioned Business",
             "description": "Created atomically",
             "currency": "NIO",
         }
+        if include_owner:
+            data["initial_owner_email"] = self.owner.email
         data.update(overrides)
         return data
 
@@ -66,41 +103,53 @@ class BusinessProvisioningAPITests(APITestCase):
         )
         self.assertNotIn("initial_owner_email", response.data)
 
-    def test_all_legacy_roles_use_the_same_normal_creation_policy(self):
-        for role in User.Roles.values:
-            with self.subTest(role=role):
-                user = create_user(
-                    email=f"normal-{role}@playnow.test",
-                    role=role,
-                )
-                self.authenticate(user)
-                response = self.client.post(
-                    reverse("business-list"),
-                    self.payload(business_name=f"Business {role}"),
-                    format="json",
-                )
-                self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-                self.assert_business_contract(response)
-                business = Business.objects.get(public_id=response.data["public_id"])
-                self.assertEqual(business.user_id, user.pk)
-                membership = BusinessMembership.objects.get(
-                    business=business,
-                    user=user,
-                )
-                self.assertEqual(membership.role, BusinessMembership.ROLE_OWNER)
-                self.assertTrue(membership.is_active)
-                self.assertIsNone(membership.employee_id)
-
-    def test_normal_user_cannot_submit_initial_owner_email(self):
-        self.authenticate(self.owner)
-        before = Business.objects.count()
-        response = self.client.post(
-            reverse("business-list"),
-            self.payload(initial_owner_email=self.other_creator.email),
-            format="json",
+    def test_only_current_active_platform_admin_reaches_payload_validation(self):
+        actors = [
+            *self.local_actors,
+            *self.global_role_actors,
+            self.staff_only,
+            self.inactive_platform,
+        ]
+        payloads = (
+            self.payload(include_owner=False),
+            self.payload(initial_owner_email="not-an-email"),
+            self.payload(initial_owner_email="missing@playnow.test"),
+            self.payload(initial_owner_email=self.inactive_owner.email),
         )
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(Business.objects.count(), before)
+        before = (
+            Business.objects.count(),
+            BusinessMembership.objects.count(),
+            User.objects.count(),
+            Employee.objects.count(),
+        )
+        forbidden_response = None
+        with patch("core.views.log_action") as audit:
+            for actor in actors:
+                for payload in payloads:
+                    with self.subTest(actor=actor.email, payload=payload):
+                        self.authenticate(actor)
+                        response = self.client.post(
+                            reverse("business-list"),
+                            payload,
+                            format="json",
+                        )
+                        self.assertEqual(
+                            response.status_code,
+                            status.HTTP_403_FORBIDDEN,
+                        )
+                        if forbidden_response is None:
+                            forbidden_response = response.data
+                        self.assertEqual(response.data, forbidden_response)
+            audit.assert_not_called()
+        self.assertEqual(
+            (
+                Business.objects.count(),
+                BusinessMembership.objects.count(),
+                User.objects.count(),
+                Employee.objects.count(),
+            ),
+            before,
+        )
 
     def test_platform_admin_assigns_existing_owner_without_implicit_membership(self):
         self.authenticate(self.platform)
@@ -117,6 +166,7 @@ class BusinessProvisioningAPITests(APITestCase):
         self.assert_business_contract(response)
         business = Business.objects.get(public_id=response.data["public_id"])
         self.assertEqual(business.user_id, self.platform.pk)
+        self.assertEqual(business.status_id, self.active.pk)
         membership = BusinessMembership.objects.get(business=business)
         self.assertEqual(membership.user_id, self.owner.pk)
         self.assertEqual(membership.role, BusinessMembership.ROLE_OWNER)
@@ -130,6 +180,15 @@ class BusinessProvisioningAPITests(APITestCase):
         )
         self.assertEqual(User.objects.count(), users_before)
         self.assertEqual(Employee.objects.count(), employees_before)
+        self.assertEqual(
+            BusinessMembership.objects.filter(
+                business=business,
+                role=BusinessMembership.ROLE_OWNER,
+                is_active=True,
+                user__is_active=True,
+            ).count(),
+            1,
+        )
 
     def test_owner_can_already_belong_to_another_business(self):
         existing = BusinessMembership.objects.create(
@@ -174,7 +233,7 @@ class BusinessProvisioningAPITests(APITestCase):
     def test_platform_admin_owner_errors_are_uniform_and_atomic(self):
         self.authenticate(self.platform)
         cases = (
-            ({}, "missing"),
+            ({"include_owner": False}, "missing"),
             ({"initial_owner_email": "missing@playnow.test"}, "missing-user"),
             ({"initial_owner_email": self.inactive_owner.email}, "inactive"),
         )
@@ -238,7 +297,7 @@ class BusinessProvisioningAPITests(APITestCase):
             format="json",
         )
         self.assertEqual(anonymous.status_code, status.HTTP_401_UNAUTHORIZED)
-        self.authenticate(self.owner)
+        self.authenticate(self.platform)
         response = self.client.post(
             reverse("business-list"),
             self.payload(status_public_id=str(self.inactive.public_id)),
@@ -247,7 +306,7 @@ class BusinessProvisioningAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("status_public_id", response.data)
 
-    def test_openapi_documents_conditional_write_only_owner_email(self):
+    def test_openapi_documents_platform_only_required_owner_email(self):
         schema = SchemaGenerator().get_schema(request=None, public=True)
         operation = schema["paths"]["/api/businesses/"]["post"]
         request_schema = operation["requestBody"]["content"][
@@ -261,7 +320,11 @@ class BusinessProvisioningAPITests(APITestCase):
         owner_field = component["properties"]["initial_owner_email"]
         self.assertEqual(owner_field["format"], "email")
         self.assertTrue(owner_field["writeOnly"])
-        self.assertNotIn("initial_owner_email", component["required"])
+        self.assertIn("initial_owner_email", component["required"])
+        self.assertEqual(
+            set(operation["responses"]),
+            {"201", "400", "401", "403", "409", "503"},
+        )
         self.assertEqual(
             operation["responses"]["201"]["content"]["application/json"][
                 "schema"
@@ -270,7 +333,7 @@ class BusinessProvisioningAPITests(APITestCase):
         )
 
     def test_logging_failure_rolls_back_business_and_membership(self):
-        self.authenticate(self.owner)
+        self.authenticate(self.platform)
         before = (Business.objects.count(), BusinessMembership.objects.count())
         with patch("core.views.log_action", side_effect=RuntimeError("log failed")):
             with self.assertRaises(RuntimeError):
@@ -354,7 +417,8 @@ class BusinessProvisioningTransactionTests(TransactionTestCase):
         service_at_lock = Event()
         release_holder = Event()
         service_finished = Event()
-        original_lock_users = business_provisioning_service._lock_users
+        original_lock_actor = business_provisioning_service._lock_actor
+        original_lock_owner = business_provisioning_service._lock_initial_owner
 
         def holder():
             close_old_connections()
@@ -377,9 +441,18 @@ class BusinessProvisioningTransactionTests(TransactionTestCase):
                 close_old_connections()
                 connections.close_all()
 
-        def synchronized_lock_users(user_ids):
-            service_at_lock.set()
-            return original_lock_users(user_ids)
+        def synchronized_lock_actor(actor_id):
+            if actor_id == locked_user_id:
+                service_at_lock.set()
+            return original_lock_actor(actor_id)
+
+        def synchronized_lock_owner(*, owner_id, locked_actor):
+            if owner_id == locked_user_id:
+                service_at_lock.set()
+            return original_lock_owner(
+                owner_id=owner_id,
+                locked_actor=locked_actor,
+            )
 
         def service_worker():
             close_old_connections()
@@ -387,8 +460,11 @@ class BusinessProvisioningTransactionTests(TransactionTestCase):
                 if not row_locked.wait(timeout=10):
                     raise TimeoutError("The User row was not locked.")
                 with patch(
-                    "core.services.business_provisioning._lock_users",
-                    side_effect=synchronized_lock_users,
+                    "core.services.business_provisioning._lock_actor",
+                    side_effect=synchronized_lock_actor,
+                ), patch(
+                    "core.services.business_provisioning._lock_initial_owner",
+                    side_effect=synchronized_lock_owner,
                 ):
                     try:
                         return operation()
@@ -446,15 +522,16 @@ class BusinessProvisioningTransactionTests(TransactionTestCase):
         before = self.state()
 
         def prepare():
-            actor = User.objects.get(pk=self.actor.pk)
+            actor = User.objects.get(pk=self.platform.pk)
             return lambda: provision_business(
                 actor=actor,
                 validated_business_data=self.data("Inactive Actor"),
+                initial_owner_email=self.owner.email,
             )
 
         result = self.run_after_committed_change(
             prepare_operation=prepare,
-            commit_change=lambda: User.objects.filter(pk=self.actor.pk).update(
+            commit_change=lambda: User.objects.filter(pk=self.platform.pk).update(
                 is_active=False,
             ),
         )
@@ -492,28 +569,28 @@ class BusinessProvisioningTransactionTests(TransactionTestCase):
                 self.assertEqual(result[0], "invalid")
                 self.assertEqual(self.state(), before)
 
-    def test_actor_gaining_superuser_does_not_silently_keep_normal_mode(self):
+    def test_is_staff_without_superuser_never_authorizes_creation(self):
         before = self.state()
 
         def prepare():
             actor = User.objects.get(pk=self.actor.pk)
             return lambda: provision_business(
                 actor=actor,
-                validated_business_data=self.data("Promoted Actor"),
+                validated_business_data=self.data("Staff Only Actor"),
+                initial_owner_email=self.owner.email,
             )
 
         result = self.run_after_committed_change(
             prepare_operation=prepare,
             commit_change=lambda: User.objects.filter(pk=self.actor.pk).update(
-                is_superuser=True,
+                is_superuser=False,
                 is_staff=True,
             ),
         )
-        self.assertEqual(result[0], "invalid")
-        self.assertIn("initial_owner_email", result[1])
+        self.assertEqual(result[0], "forbidden")
         self.assertEqual(self.state(), before)
 
-    def test_stale_actor_attributes_never_decide_the_requested_mode(self):
+    def test_stale_actor_attributes_never_decide_authorization_or_validation(self):
         stale_platform = User.objects.get(pk=self.platform.pk)
         User.objects.filter(pk=self.platform.pk).update(
             is_superuser=False,
@@ -525,7 +602,7 @@ class BusinessProvisioningTransactionTests(TransactionTestCase):
             with self.assertRaises(BusinessProvisioningError) as context:
                 provision_business(
                     actor=actor,
-                    validated_business_data=self.data("Rejected Admin Mode"),
+                    validated_business_data=self.data("Rejected Platform Admin"),
                     initial_owner_email=self.owner.email,
                 )
             outcomes.append((context.exception.kind, context.exception.detail))
@@ -543,7 +620,7 @@ class BusinessProvisioningTransactionTests(TransactionTestCase):
             with self.assertRaises(BusinessProvisioningError) as context:
                 provision_business(
                     actor=actor,
-                    validated_business_data=self.data("Rejected Normal Mode"),
+                    validated_business_data=self.data("Missing Initial Owner"),
                 )
             outcomes.append((context.exception.kind, context.exception.detail))
         self.assertEqual(outcomes[0], outcomes[1])
@@ -565,11 +642,12 @@ class BusinessProvisioningTransactionTests(TransactionTestCase):
             ),
             (
                 "inactive-actor",
-                self.actor.pk,
+                self.platform.pk,
                 {"is_active": False},
                 lambda: provision_business(
-                    actor=self.actor,
+                    actor=self.platform,
                     validated_business_data=self.data("Locked Inactive Actor"),
+                    initial_owner_email=self.owner.email,
                 ),
                 "forbidden",
             ),
@@ -717,7 +795,7 @@ class BusinessProvisioningTransactionTests(TransactionTestCase):
         def worker(number):
             close_old_connections()
             try:
-                actor = User.objects.get(pk=self.actor.pk)
+                actor = User.objects.get(pk=self.platform.pk)
                 status_obj = type(self.active).objects.get(pk=self.active.pk)
                 barrier.wait(timeout=10)
                 business, membership = provision_business(
@@ -728,6 +806,7 @@ class BusinessProvisioningTransactionTests(TransactionTestCase):
                         "currency": "NIO",
                         "status": status_obj,
                     },
+                    initial_owner_email=self.owner.email,
                 )
                 return business.pk, membership.pk
             finally:
@@ -746,7 +825,7 @@ class BusinessProvisioningTransactionTests(TransactionTestCase):
         for business_id, membership_id in results:
             membership = BusinessMembership.objects.get(pk=membership_id)
             self.assertEqual(membership.business_id, business_id)
-            self.assertEqual(membership.user_id, self.actor.pk)
+            self.assertEqual(membership.user_id, self.owner.pk)
             self.assertEqual(membership.role, BusinessMembership.ROLE_OWNER)
             self.assertTrue(membership.is_active)
 
@@ -783,9 +862,10 @@ class BusinessProvisioningTransactionTests(TransactionTestCase):
                 with patch(target, **kwargs):
                     with self.assertRaises(expected):
                         provision_business(
-                            actor=self.actor,
+                            actor=self.platform,
                             validated_business_data=self.data(
                                 f"Rollback {expected.__name__}"
                             ),
+                            initial_owner_email=self.owner.email,
                         )
                 self.assertEqual(self.state(), before)
