@@ -405,11 +405,6 @@ class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelView
 
         """
 
-        user = self.request.user
-
-        if self._is_platform_admin(user):
-            return
-
         business_lookup = (
             self._get_business_lookup()
         )
@@ -434,6 +429,9 @@ class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelView
 
             return
 
+        # El acceso global de Platform Admin omite membresía y rol, pero
+        # nunca permite escribir sobre un Business no operativo. Esta
+        # comprobación debe ocurrir antes de evaluar ese bypass.
         self._validate_business_access(
             business,
             allowed_roles=allowed_roles,

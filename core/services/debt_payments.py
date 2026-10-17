@@ -5,11 +5,13 @@ from django.utils import timezone
 from rest_framework.exceptions import APIException, ValidationError
 
 from core.models import (
+    Business,
     Debt,
     DebtPayment,
     PaymentMethod,
     Transaction,
 )
+from core.business_policy import require_operational_business
 from core.services.financial_flows import (
     is_terminal_transaction_status,
 )
@@ -96,6 +98,17 @@ def register_debt_payment(
         )
         .get(pk=debt.transaction_id)
     )
+
+    # Serializa el pago con cualquier transición de lifecycle. La
+    # validación previa del endpoint no es suficiente porque el estado del
+    # Business puede cambiar mientras esta operación espera sus locks.
+    business = (
+        Business.objects
+        .select_for_update(of=("self",))
+        .select_related("status")
+        .get(pk=transaction.business_id)
+    )
+    require_operational_business(business)
 
     if is_terminal_transaction_status(transaction.status):
         raise DebtPaymentConflict({

@@ -9,7 +9,7 @@ from drf_spectacular.generators import SchemaGenerator
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
-from core.models import Business, BusinessMembership
+from core.models import Business, BusinessMembership, Employee, User
 from core.services.business_lifecycle import (
     BusinessLifecycleError,
     archive_business,
@@ -300,6 +300,58 @@ class BusinessSuspensionAPITests(APITestCase):
 
     def test_status_public_id_is_rejected_and_create_is_always_active(self):
         self.authenticate(self.owner)
+        initial_counts = {
+            "businesses": Business.objects.count(),
+            "memberships": BusinessMembership.objects.count(),
+            "users": User.objects.count(),
+            "employees": Employee.objects.count(),
+        }
+        forbidden_responses = []
+        initial_owner_values = (
+            None,
+            "not-an-email",
+            "missing-owner@playnow.test",
+            self.owner.email,
+        )
+        with patch("core.views.log_action") as audit:
+            for initial_owner_email in initial_owner_values:
+                payload = {
+                    "business_name": "Forbidden Local Business",
+                    "description": "",
+                    "currency": "NIO",
+                    "status_public_id": str(self.inactive.public_id),
+                }
+                if initial_owner_email is not None:
+                    payload["initial_owner_email"] = initial_owner_email
+                response = self.client.post(
+                    "/api/businesses/",
+                    payload,
+                    format="json",
+                )
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_403_FORBIDDEN,
+                )
+                forbidden_responses.append(response.data)
+            audit.assert_not_called()
+
+        self.assertTrue(
+            all(
+                response_data == forbidden_responses[0]
+                for response_data in forbidden_responses[1:]
+            )
+        )
+        self.assertEqual(
+            {
+                "businesses": Business.objects.count(),
+                "memberships": BusinessMembership.objects.count(),
+                "users": User.objects.count(),
+                "employees": Employee.objects.count(),
+            },
+            initial_counts,
+        )
+
+        self.authenticate(self.platform)
         create_response = self.client.post(
             "/api/businesses/",
             {
@@ -307,6 +359,7 @@ class BusinessSuspensionAPITests(APITestCase):
                 "description": "",
                 "currency": "NIO",
                 "status_public_id": str(self.inactive.public_id),
+                "initial_owner_email": self.owner.email,
             },
             format="json",
         )
@@ -324,6 +377,7 @@ class BusinessSuspensionAPITests(APITestCase):
                 "business_name": "Always Active Business",
                 "description": "",
                 "currency": "NIO",
+                "initial_owner_email": self.owner.email,
             },
             format="json",
         )
