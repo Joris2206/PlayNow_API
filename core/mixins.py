@@ -21,7 +21,11 @@ from core.models import (
     Business,
     BusinessMembership,
 )
-from core.business_policy import filter_operational_businesses
+from core.business_policy import (
+    filter_approved_business_reads,
+    filter_operational_businesses,
+    is_current_active_platform_admin,
+)
 
 class SoftDeleteByStatusMixin:
     """
@@ -123,6 +127,26 @@ class RequireBusinessPublicIdListMixin:
 
     business_lookup = None
     list_allowed_roles = None
+    inactive_supervision_read_actions = frozenset()
+
+    def _is_inactive_supervision_read_approved(self):
+        return (
+            self.request.method == "GET"
+            and getattr(self, "action", None)
+            in self.inactive_supervision_read_actions
+        )
+
+    def _filter_queryset_by_business_state(self, queryset):
+        if self._is_inactive_supervision_read_approved():
+            return filter_approved_business_reads(
+                queryset,
+                user=self.request.user,
+                lookup=self.business_lookup,
+            )
+        return filter_operational_businesses(
+            queryset,
+            self.business_lookup,
+        )
 
     @extend_schema(
         parameters=[
@@ -170,11 +194,21 @@ class RequireBusinessPublicIdListMixin:
                 )
             })
 
-        return get_object_or_404(
-            filter_operational_businesses(
-                Business.objects.all(),
+        businesses = Business.objects.all()
+        if self._is_inactive_supervision_read_approved():
+            businesses = filter_approved_business_reads(
+                businesses,
+                user=self.request.user,
                 lookup="",
-            ),
+            )
+        else:
+            businesses = filter_operational_businesses(
+                businesses,
+                lookup="",
+            )
+
+        return get_object_or_404(
+            businesses,
             public_id=business_public_id,
         )
 
@@ -184,7 +218,7 @@ class RequireBusinessPublicIdListMixin:
     ):
         user = self.request.user
 
-        if user.is_superuser:
+        if is_current_active_platform_admin(user):
             return
 
         filters = {

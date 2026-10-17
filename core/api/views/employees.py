@@ -67,6 +67,7 @@ class EmployeeViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     lookup_url_kwarg = "public_id"
 
     business_lookup = "business"
+    inactive_supervision_read_actions = frozenset({"list", "retrieve"})
 
     read_allowed_roles = [
         BusinessMembership.ROLE_OWNER,

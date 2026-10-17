@@ -7,7 +7,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from core.mixins import RequireBusinessPublicIdListMixin
 from core.models import BusinessMembership, EntityStatus
 from core.business_policy import (
-    filter_operational_businesses,
+    is_current_active_platform_admin,
     require_operational_business,
 )
 from core.permissions import IsOwnerOrBusinessOwner
@@ -96,11 +96,7 @@ class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelView
         administrador global de Django.
         """
 
-        return bool(
-            user
-            and user.is_authenticated
-            and user.is_superuser
-        )
+        return is_current_active_platform_admin(user)
 
     @staticmethod
     def _model_has_field(
@@ -449,9 +445,8 @@ class BusinessScopedViewSet(RequireBusinessPublicIdListMixin, viewsets.ModelView
         )
 
         if business_lookup:
-            queryset = filter_operational_businesses(
+            queryset = self._filter_queryset_by_business_state(
                 queryset,
-                business_lookup,
             )
 
         owner_lookup = getattr(

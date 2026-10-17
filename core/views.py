@@ -72,6 +72,10 @@ from core.business_policy import (
     ACTIVE_BUSINESS_STATUS,
     DELETED_BUSINESS_STATUS,
     INACTIVE_BUSINESS_STATUS,
+    approved_business_read_q,
+    filter_approved_business_reads,
+    filter_operational_businesses,
+    is_current_active_platform_admin,
     normalized_status_name,
     require_operational_business,
 )
@@ -870,12 +874,21 @@ class BusinessMembershipViewSet(
             "employee",
             "employee__status",
             "business",
-        ).filter(
-            business__status__name__iexact=ACTIVE_BUSINESS_STATUS,
         ).annotate(
             user_email=F("user__email"),
             user_full_name=F("user__full_name"),
         )
+        if self.action == "list":
+            queryset = filter_approved_business_reads(
+                queryset,
+                user=self.request.user,
+                lookup="business",
+            )
+        else:
+            queryset = filter_operational_businesses(
+                queryset,
+                lookup="business",
+            )
         if self.action == "list":
             business_pk = getattr(self, "_authorized_business_pk", None)
             if business_pk is None:
@@ -884,7 +897,7 @@ class BusinessMembershipViewSet(
         user = self.request.user
         if not user.is_authenticated:
             return queryset.none()
-        if user.is_superuser:
+        if is_current_active_platform_admin(user):
             return queryset
         return queryset.filter(
             business__memberships__user=user,
@@ -907,7 +920,6 @@ class BusinessMembershipViewSet(
         actor_id = request.user.pk
         authorized_businesses = (
             Business.objects.filter(public_id=business_public_id)
-            .filter(status__name__iexact=ACTIVE_BUSINESS_STATUS)
             .annotate(
                 actor_is_platform_admin=Exists(
                     User.objects.filter(
@@ -936,6 +948,12 @@ class BusinessMembershipViewSet(
                         is_active=True,
                     )
                 ),
+            )
+            .filter(
+                approved_business_read_q(
+                    user=request.user,
+                    lookup="",
+                )
             )
             .filter(
                 Q(actor_is_platform_admin=True)
@@ -1419,6 +1437,14 @@ class BusinessViewSet(
 
         business = self.get_object()
 
+        if normalized_status_name(business) not in {
+            ACTIVE_BUSINESS_STATUS.casefold(),
+            INACTIVE_BUSINESS_STATUS.casefold(),
+        }:
+            raise NotFound(
+                "El recurso solicitado no se encuentra disponible."
+            )
+
         self._validate_management_access(
             business
         )
@@ -1793,6 +1819,7 @@ class ProductCategoryViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     serializer_class = ProductCategorySerializer
 
     business_lookup = "business"
+    inactive_supervision_read_actions = frozenset({"list", "retrieve"})
 
     read_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
@@ -1846,6 +1873,7 @@ class ProductViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     serializer_class = ProductSerializer
 
     business_lookup = "business"
+    inactive_supervision_read_actions = frozenset({"list", "retrieve"})
 
     read_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
@@ -1974,6 +2002,7 @@ class StockMovementViewSet(BusinessScopedViewSet):
     serializer_class = StockMovementSerializer
 
     business_lookup = "product__business"
+    inactive_supervision_read_actions = frozenset({"list", "retrieve"})
 
     read_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
@@ -2100,6 +2129,7 @@ class TransactionViewSet(SoftDeleteByStatusMixin, BusinessScopedViewSet):
     )
     serializer_class = TransactionSerializer
     business_lookup = "business"
+    inactive_supervision_read_actions = frozenset({"list", "retrieve"})
     soft_delete_status_name = "Anulado"
     destroy_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
@@ -2356,6 +2386,7 @@ class DebtViewSet(BusinessScopedViewSet):
     
     serializer_class = DebtSerializer
     business_lookup = "transaction__business"
+    inactive_supervision_read_actions = frozenset({"list", "retrieve"})
     filterset_class = DebtFilter
 
     read_allowed_roles = [
@@ -2413,6 +2444,7 @@ class DebtPaymentViewSet(BusinessScopedViewSet):
     serializer_class = DebtPaymentSerializer
 
     business_lookup = "debt__transaction__business"
+    inactive_supervision_read_actions = frozenset({"list", "retrieve"})
     filterset_class = DebtPaymentFilter
 
     read_allowed_roles = [
@@ -2634,9 +2666,6 @@ class EmployeeCommissionPlanViewSet(
             "employee",
             "employee__business",
         )
-        .filter(
-            employee__business__status__name__iexact=ACTIVE_BUSINESS_STATUS,
-        )
         .order_by(
             "-valid_from",
             "-created_at",
@@ -2684,6 +2713,7 @@ class EmployeeCommissionPlanViewSet(
     business_lookup = (
         "employee__business"
     )
+    inactive_supervision_read_actions = frozenset({"list", "retrieve"})
 
     list_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
@@ -2691,10 +2721,12 @@ class EmployeeCommissionPlanViewSet(
     ]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = self._filter_queryset_by_business_state(
+            super().get_queryset()
+        )
         user = self.request.user
 
-        if user.is_superuser:
+        if is_current_active_platform_admin(user):
             return queryset
 
         return (
@@ -2714,6 +2746,7 @@ class EmployeeCommissionPlanViewSet(
         self,
         employee,
     ):
+        require_operational_business(employee.business)
         validate_report_business_access(
             user=self.request.user,
             business=employee.business,
@@ -3293,9 +3326,6 @@ class CommissionSettlementViewSet(
             "employee__business",
             "created_by",
         )
-        .filter(
-            employee__business__status__name__iexact=ACTIVE_BUSINESS_STATUS,
-        )
         .order_by(
             "-period_end",
             "-created_at",
@@ -3348,6 +3378,7 @@ class CommissionSettlementViewSet(
     business_lookup = (
         "employee__business"
     )
+    inactive_supervision_read_actions = frozenset({"list", "retrieve"})
 
     list_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
@@ -3365,10 +3396,12 @@ class CommissionSettlementViewSet(
         )
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = self._filter_queryset_by_business_state(
+            super().get_queryset()
+        )
         user = self.request.user
 
-        if user.is_superuser:
+        if is_current_active_platform_admin(user):
             return queryset
 
         return (
@@ -3655,7 +3688,6 @@ class CashRegisterViewSet(
             "opened_by",
             "closed_by",
         )
-        .filter(business__status__name__iexact=ACTIVE_BUSINESS_STATUS)
         .order_by("-open_time")
     )
 
@@ -3695,6 +3727,7 @@ class CashRegisterViewSet(
     ]
 
     business_lookup = "business"
+    inactive_supervision_read_actions = frozenset({"list", "retrieve"})
 
     list_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
@@ -3724,10 +3757,12 @@ class CashRegisterViewSet(
         return CashRegisterSerializer
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = self._filter_queryset_by_business_state(
+            super().get_queryset()
+        )
         user = self.request.user
 
-        if not user.is_superuser:
+        if not is_current_active_platform_admin(user):
             queryset = (
                 queryset
                 .filter(
@@ -4052,11 +4087,6 @@ class CashMovementViewSet(
             "payment_method",
             "created_by",
         )
-        .filter(
-            cash_register__business__status__name__iexact=(
-                ACTIVE_BUSINESS_STATUS
-            ),
-        )
         .order_by("-created_at")
     )
 
@@ -4104,6 +4134,7 @@ class CashMovementViewSet(
     business_lookup = (
         "cash_register__business"
     )
+    inactive_supervision_read_actions = frozenset({"list", "retrieve"})
 
     list_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
@@ -4118,10 +4149,12 @@ class CashMovementViewSet(
     ]
     
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = self._filter_queryset_by_business_state(
+            super().get_queryset()
+        )
         user = self.request.user
 
-        if user.is_superuser:
+        if is_current_active_platform_admin(user):
             return queryset
 
         return (
@@ -4321,7 +4354,6 @@ class MonthlyClosureViewSet(
             "closed_by",
             "reopened_by",
         )
-        .filter(business__status__name__iexact=ACTIVE_BUSINESS_STATUS)
         .order_by(
             "-year",
             "-month",
@@ -4375,6 +4407,7 @@ class MonthlyClosureViewSet(
     ]
 
     business_lookup = "business"
+    inactive_supervision_read_actions = frozenset({"list", "retrieve"})
 
     list_allowed_roles = [
         BusinessMembership.ROLE_OWNER,
@@ -4395,10 +4428,12 @@ class MonthlyClosureViewSet(
         return MonthlyClosureSerializer
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = self._filter_queryset_by_business_state(
+            super().get_queryset()
+        )
         user = self.request.user
 
-        if user.is_superuser:
+        if is_current_active_platform_admin(user):
             return queryset
 
         return (

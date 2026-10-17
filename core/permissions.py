@@ -5,7 +5,25 @@ from core.models import (
     BusinessMembership,
     User,
 )
-from core.business_policy import require_operational_business
+from core.business_policy import (
+    is_current_active_platform_admin,
+    require_approved_business_read_access,
+    require_operational_business,
+)
+
+
+def require_business_state_for_view(*, request, view, business):
+    approved_read = getattr(
+        view,
+        "_is_inactive_supervision_read_approved",
+        None,
+    )
+    if approved_read is not None and approved_read():
+        return require_approved_business_read_access(
+            user=request.user,
+            business=business,
+        )
+    return require_operational_business(business)
 
 
 def get_business_from_object(obj):
@@ -160,9 +178,13 @@ class HasBusinessMembership(BasePermission):
 
         business = get_business_from_object(obj)
         if business is not None:
-            require_operational_business(business)
+            require_business_state_for_view(
+                request=request,
+                view=view,
+                business=business,
+            )
 
-        if user.is_superuser:
+        if is_current_active_platform_admin(user):
             return True
 
         if business is None:
@@ -392,9 +414,13 @@ class IsOwnerOrBusinessOwner(BasePermission):
 
         business = get_business_from_object(obj)
         if business is not None:
-            require_operational_business(business)
+            require_business_state_for_view(
+                request=request,
+                view=view,
+                business=business,
+            )
 
-        if user.is_superuser:
+        if is_current_active_platform_admin(user):
             return True
 
         owner_lookup = getattr(
